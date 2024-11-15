@@ -28,7 +28,21 @@ $ ../blktrace_merge nvme0n1.blktrace.txt
 
 FILE: nvme0n1.blktrace.merged.txt
 
-#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
-#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
-<b>  0|   1:  1   0.000000000   -.----      0.009435     23.549326 % 99     23.558761   3     1867 W      16      763360912             0 [dmcrypt_write/2]        0   2:  8,  8.</b>
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- --------------... 
+<b>  0|   1:  1   0.000000000   -.----      0.009435     23.549326 % 99     23.558761   3     1867 W      16      763360912...</b>
+
+ ...          Seek        Description            reQ Merges:sectors,...
+ ...        ------------- ---------------------- --- ---:-----------------
+ ...                    <b>0 [dmcrypt_write/2]        0   2:  8,  8.</b>
+         
 </code>
+
+In the above case, the total <code>iostat</code> await time is the Q2C time period which can be broken down into sub-parts:
+<ul><li>Q2D, "kernel-side" time, and</li>
+<li>D2C, "storage-side" time.</li></ul>
+
+In most cases the D2C storage related time dominates the total Q2C time -- in this case 23.549ms is storage and 0.009ms is kernel based time.  The D2C time is a block of time that cannot be further subdivided and covers a fixed code path amount of time in the driver, the host (storage) bus adapter's (HBA) firmware and hardware time to pass the io request out to the transport, the transport time (for fibre channel this includes switch time), the target or storage controller at the far end of the storage bus transport, the physical storage time, and the returned status and data path back to through the HBA to the kernel's io done routine.
+
+
+
