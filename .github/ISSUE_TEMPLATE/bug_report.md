@@ -1,38 +1,33 @@
 ---
 name: Bug report
 about: Create a report to help us improve
-title: ''
-labels: ''
-assignees: ''
+title: '[Bug] concise one-line description of issue'
+labels: ["bug"]
+assignees:
+    - oxdeadmeat
 
 ---
 
-**Describe the bug**
+**Describe the bug**</br>
 A clear and concise description of what the bug is.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+**Version**</br>
+The output of ***blktrace_merge -V***
 
-**Expected behavior**
+**Test Data**</br>
+An archive that includes a README and the devicename.blktrace.txt file output from the blkparse utility.  This data should be added as a new archive and/or new subdirectory under ./TestData project directory or otherwise a public web pointer to the data should be included.
+
+**Steps To Reproduce**</br>
+Steps to reproduce the behavior:
+1. Run blktrace_merge with options...
+2. Describe output ...
+3. See error
+
+**Actual behavior**</br>
+A clear description of what actually happens.
+
+**Expected behavior**</br>
 A clear and concise description of what you expected to happen.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
-
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
-
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
-
-**Additional context**
-Add any other context about the problem here.
+**Additional information**</br>
+Any other additional information about the problem added here.
