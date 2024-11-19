@@ -1,0 +1,937 @@
+#Input file: nvme0n1.blktrace.txt
+#Version   : 06.42-0626-23022024
+#
+#@@@ shortform=0
+# CONFIG   :-command line options---------------------------------------------------------------------------------------------
+# CONFIG   : flag_verbose                      0   [-v]    {enable additional verbose output                                     }
+# CONFIG   : flag_quiet                        0   [-q]    {quiet down 'standard' output, remove %I, %W, with add'l -q           }
+# CONFIG   : flag_unplugs                      0   [-u]    {turn off logging of unplug  4.594811e-322vents                                 }
+# CONFIG   : flag_negrequeue                   0   [-r]    {do not reset dispatch time at requeue time                           }
+# CONFIG   : flag_processbad                   0   [-b]    {processe 'bad' files - files w/o 'C' events are typ. skipped         }
+# CONFIG   : flag_showconfig                   1   [-s]    {show config (this) output                                            }
+# CONFIG   : flag_alignchk                     0   [-Annn] {perform alignment check against starting sector [1]                  }
+# CONFIG   : alignquanta                       8   [ ]     {[1] value provided in -A option, in sectors                          }
+# CONFIG   :-blktrace.conf options--------------------------------------------------------------------------------------------
+# CONFIG   : disk_count_threshold              1           {heat map: print out disk  bucket only if >= this numbr io present    }
+# CONFIG   : disk_group_count_threshold        1           {heat map: print out group bucket only if >= this numbr io present    }
+# CONFIG   : disk_stripe_multiplier         1024           {heat map: numbr of 128Kib 'stripes' to include in a bucket           }
+# CONFIG   : include_d2d                       0           {head map: include D2D time as separate column in ouput for requeues  }
+# CONFIG   : noreset_on_requeue                0           {see -r, moves D2D time from Q2D (default) to D2C time                }
+# CONFIG   : no_annotation                     0           {see -a, stops output to annotation/trace file                        }
+# CONFIG   :-filenames--------------------------------------------------------------------------------------------------------
+# CONFIG   : input filename        'nvme0n1.blktrace.txt'
+# CONFIG   : output filename       'nvme0n1.blktrace.merged.txt'
+# CONFIG   : except filename       'nvme0n1.blktrace.merged.exceptions'
+# CONFIG   : bucket filename       'nvme0n1.blktrace.merged.buckets'
+# CONFIG   : heat map data         '<name>.blktrace.merged.hotlba.bin'
+# CONFIG   : head map report       '<group>.blktrace.merged.group.out'
+#
+#NOTES     :
+# . data reported in at io 'C'omplete time, so list is in completed time order, not queued time order.
+# . PS  = pre-staged  count (within scheduler), io that has not been determined to be a M or G,I.
+# . Prg = in-progress count (within scheduler), that is 'Q'ueued io that hasn't 'C'ompleted
+# . Flt = in-flight   count (within driver/storage), that is 'D'ispatched io that hasn't 'C'ompleted.
+#                           (excludes currently completing io listed within summary line output)
+# . Typ = 'R'ead, 'W'rite, 'D'iscard, 'B'arrier, or 'N'one (!write & bytes!=0:ioctl?).
+#         'F'lush, but only if this is BEFORE the R|W|D|N letter code
+#         'F'ua,   but only if this is AFTER  the R|W|D|N letter code
+#         'S'yncronous, 'M'eta, or Read'A'head 
+#         note: the above codes are set within the binary data within the kernel before data is exported.
+#         note: 'B'arrier seems to have been dropped from latest upstream blkparse utility.
+# . Name= [(null)], this means when blktrace attempted to translate the pid to a process name, the pid no
+#         longer existed within the process tree.
+# . 2.6.32: io complete for merged io is reported upon first (merged) io completion whose size covers the whole merged io range
+# . 3.10.0: io complete for merged io is reported when last of the io contained within a merged io completes.
+#
+# === SPECIAL CASES  ==================================================================== 
+# [GHOST]   tag appears at the end of the summary line:
+#           - one or more 'orphan' events were encountered which triggered the creations
+#             of a 'ghost' request.  For example first event for an io context is an 'I'
+#             results in a 'ghost' with synthesized 'Q' event.  Ghost events do not affect
+#             inProgress, InFlight or any other io statistics -- they are ghosts.
+# [Barrier] tag appears at the end of the summary line:
+#           - a sequence of A,Q,G,I,C for sector:length 0:0 was detected. There are several
+#             unusual attributes associated with this sequence including only the A event
+#             has a specified sector:length (0 + 0) in the event -- all others have neither.
+#             this appears to be uses as some type of io barrier.  there is no 'D'ispatch
+#             as there is no data movement due to length=0.  There is special code to detect
+#             this particular sequence and it gets flagged as Special Case.1.
+# [BARRIER] tag appears at the end of the summary line:
+#           - a non-read io with a sector:length value of 0:0 is detected, for 
+#             example 'FWS 0 + 0' is a Flush/Write/Sync io of zero length to sector 0.
+#             such io will not have a 'D'ispatch event and are considered a generic 
+#             io barrier and are so tagged.  The difference between this and [Barrier] above
+#             is that the above is a more specific 4.18 event stream type that requires
+#             additional 'special' handling with the code whereas a generic io barrier is
+#             otherwise the same as any normal io (with the exception of the missing
+#             'D'ispatch event because the io has a zero-length size.
+# ======================================================================================= 
+#
+# . NVMe : NVMe device detected within blktrace capture log file.
+#          NVMe devices have ioscheduler <none>, which means it does not have 'I'nsert events.  Within some
+#          kernel versions there are no 'D'ispatch events, as a 'Q'ueue implies a 'D'ispatch event.
+#          For NVMe devices the 'I' and 'D' events are set to the 'Q'ueue time if they are found to be 0.0.
+#         This will result in Q2I (and in some cases Q2D) delta times to always be zero.  In those cases where
+#           there was no 'D' event, the D2C(dt) will be the same as Q2C times as a result.
+#
+# === Time Descriptions ================================================================= 
+#  (*)  Q2Q — time between requests sent to the block layer
+#  (*)  Q2G — how long it takes from the time a block I/O is queued to the time it gets a request allocated for it
+#  (*)  G2I — how long it takes from the time a request is allocated to the time it is Inserted into the device's queue
+#       Q2I - how long it takes from the time a block I/O is assigned to a new request and inserted into the scheduler queue[1]
+#  (*)  Q2M — how long it takes from the time a block I/O is queued to the time it gets merged with an existing request
+#       I2D — how long it takes from the time a request is inserted into the device's queue to the time it is actually issued to the device
+#  (*)  M2D — how long it takes from the time a block I/O is merged with an exiting request until the request is issued to the device
+#       D2D - how long it takes from the first time I/O is issued to the device to the last time I/O was re-issued to the device [2]
+#       D2C — service time of the request by the device, this time is dominated by storage latency[3]
+#       Q2C — total time spent in the block layer for a request
+# 
+#  (*)  indicates this delta time value is not output within the merged one-line per request output that follows
+#       but is available in other output files from standard blktrace package utilities. Typically these times are included
+#       within combined times in other columns, for example Q2I = Q2G + Q2I. Nominally the main N2N times of interest are Q2D
+#       D2C, and Q2C.  Only when 'S'leep events or 'R'equeue events occur is breaking down Q2D time for analysis of interest.
+#  [1]  Q2I is the combination of Q2G + G2I
+#  [2]  D2D will be non-zero only if there are 'R'equeue events present for the given I/O
+#  [3]  service time includes the short code path within the driver, time spent within the HBA, transport time to the storage
+#       target (including any switches between HBA and storage target), storage controller queue time, storage controller
+#       time, storage device latency, storage controller status processing time, transport time back to the host (again through
+#       any given switches, HBA time, driver short path to process the returning io completion interrupt.  While the actual
+#       'storage latency time' itself within a storage box is reasonable, the queueing time within the storage controller can be
+#       significant when the controller is under load from this, as well as other, hosts.  From a kernel perspective the whole
+#       combination of hardware latencies are seen as a monolithic storage latency that cannot be further subdivided.
+#  --------------------------------------------------------------------------------------- 
+#
+# Compact State Form:
+# ==================================================================================
+# 
+# |merge|
+# Q---->M------------>D----------------------------------------------------------->C    Merge: add into an existing request
+# Q------>G->I------->D----------------------------------------------------------->C    Add  : create a new io request
+# |--insert--|--queue-|                                                                 Q2D  : total scheduler/host time
+#                     |--- driver,adapter,transport,switch,storage latency time ---|    D2C  : total storage latency (outside of OS)
+# |---- host time ----|--- hardware based time ------------------------------------|    Q2C  : await time in iostat output
+# 
+# NOTE: Not to scale.  Earlie M,D|G,I,D events are spread out to allow string label descriptions.
+# 
+# 
+# Q---->M                                                                             Q2M, [1] 'merge' time, time to find existing request and add this I/0 to it
+# Q------>G                                                                           Q2G,     'create' time to allocate request data structure for new I/O
+#         G->I                                                                        G2I, [2] 'sort' time, how long it took sort algorithm to insert I/O request into queue
+# Q------>G->I                                                                        Q2I, [3] 'insert' time, time spent by sched on staging I/O
+# Q------>G->I------->D                                                               Q2D,     'host' time, time io request spends in scheduler, also kernel|sched time
+#            I------->D                                                               I2D, [4] 'queue' time, time spent in sched queue awaiting dispatch
+#                     D----------------------------------------------------------->C  D2C,     'storage' time, this is dominated by storage latency time
+# Q------------------------------------------------------------------------------->C  Q2C,     'await' time, time as reported via 'await' by iostat et.al.
+# 
+# 
+# |<-host side time-->|<-------------------- hardware side time ------------------>|                          
+# Q------------------>D                                                               Q2D,      host side time
+#                     D----------------------------------------------------------->C  D2C, [5]  hardware based time (driver/adapter/transport/switch/storage)
+# Q------------------------------------------------------------------------------->C  Q2C,      await time as reported by iostat, sar, etc.
+# |<------------------------ await time ------------------------------------------>|
+#
+#
+# Q------------------------------------------------------------------------------->Q  Q2Q, time between adajacent bio being set into io scheduler
+#                                                                          C------>Q  C2Q, idle time -- but only if no other io present (qdepth=0 post C event)
+#
+# NOTES
+# [1] : A merged request is simply added to an existing request already inserted/present within the scheduler.  As
+#       such, the 'M'erge (or 'F'ront merge) event is typically the last event specifically associated with this bio.
+#       Any M2D time is then associated with the request the I/O was merged into.  M2D times can increase both if
+#       additional I/O are merged into the request and due to sorting.
+# [2] : This is the time used by whatever scheduler algorithm is in use to 'sort' a request into the scheduler queue.
+#       This time will vary by which scheduler is in use.  The noop and none options have near zero 'sort' time. Things
+#       Like deadline and cfq a little more time, but in general sort time is a well behaved sort delay regardless.
+#       Typically, both because G events may not be present and due to sort time being short and well behaved, the
+#       more general Q2I time is used as the 'sort' time event though it is made up of 2 or more subcomponents.
+# [3] : Not all implementations output S|G events.  As such, the Q2I time is more typically associated with 'sort time'
+#       or queue time.  This is the total amount of time spent by the kernel staging the I/O into the scheduler.  Any 
+#       delay from I2D is more driven by scheduler policy (such as idle slice time for cfq) and/or congestion within 
+#       storage (such as lun queue depth being full so as to delay dispatch).  In general, Q2I time is more important
+#       than any of the sub-components therein.
+# [4] : The I2D time includes any scheduler personality delays, but is nominally any significant delays here will be
+#       dominated by device|target|driver lun queue full conditions.  That is, typically the delay witihn I2D time that
+#       is associated with kernel code is short.  Long delays here are almost always associated with lun queue depth
+#       issues. Scheduler personality delays that are common in I2D, for example, is the slice idle time within cfq which
+#       injects a short delay to allow for improved merging.  Similar delays are not present in deadline, noop, etc.
+# [5] : the hardware based time includes the driver path which is fairly short.  The driver's main job is to repackage
+#       the kernel request data structure into a form that the HBA's firmware can accept and then passing that mapped
+#       request information into the controller's firmware -- typically via a queue/mailbox function.  This driver 
+#       based code path is both short in duration and nominally stable.  Therefore the driver side portion of the 
+#       D2C time is considered fixed and a small fraction of total D2C time.  Internal controller functions, such as
+#       san buffer credits, can delay the HBA hardware from delaying the transmission of the io request to storage,
+#       but the kernel has no further insight into those types of hardware based issues within the HBA controller itself.
+#       Such time is counted against the hardware side of things since there is no kernel nor driver code involved in
+#       same.
+#
+# 
+# Long State Form:
+# ==================================================================================
+# 
+#               +----------+
+#               |          | 
+#               |         {R}
+#               |          ^
+#               v          |
+# A->Q+>{S}->G->I--+---->D-+--------------------------------------------------------->C    
+#     |            ^
+#     v  +--->M----+
+#     +--+--->F----+
+# 
+# Key: { }- optional or unsual events that nominally should not be present
+#       A - remAp   ; lba block mapping               M - Merge   ; merge io onto end of existing request on q
+#       Q - Queue   ; io arrival @sched               F - Front   ; merge io onto front of existing request on q
+#       S - Sleep   ; await for request               D - Dispatch; send req to driver
+#       G - Getreq  ; get request struct              R - Requeue ; io rejected, place back on queue
+#       I - Insert  ; insert req into q               C - Complete; io done 
+#       X - SplitIO ; split a request in two          B - Bounce  ; bounced data page to reserved lower memory req'd
+#       -----------------------------------------------------------------------
+#       P - Plug    ; plug/stop draining io to drv    U - Unplug  ; unplug drain
+#       T - Timeout ; unplug drain due to timeout
+#
+#NOTES:
+#{....} : are events that may not happen
+#{A-->} : remAp event, for example map the LBA (sector) from partition relative number to disk absolute sector number.
+#{-->S} : Sleep; wait for availability of request data structure, typically when nr_request limit is reached, 
+#{-->R} : Requeue: driver rejects the io even though its below advertised lun queue depth, typically a resource issue 
+#         of some type exists within the driver and/or HBA causing this rejection of the io back to the scheduler.
+#         Requeued I/O are placed at front of the queue -- next up -- and futher dispatch to the driver is stalled
+#         until this requeued io is accepted.  It can be common to see an occassional 'R'equeue happen and is 
+#         something to watch but not be overly concerned about.  However, if there are a large number of 'R'equeues
+#         happening or a large number on some io then the root cause within the hardware should be investigated. Often
+#         lowering the lun queue depth can help reduce 'R'equeues from happening.  Reducing nr_requests can have a 
+#         similar affect via indirect means by slowing the number of io available at any given time for the scheduler
+#         to use to fill the underlying lun queue.
+#
+# NOTE:   option flags will control how time associated with Requeues is accumlated, that is into either Q2D or D2C time.
+#         Either accumulation is sub-optimal which is why its recommended to allow a D2D time to be added to the per event output.
+#        events    Q------------>D->R-I->D->R->I->D------------>C 
+#          +--- option flag controlling where R,I,D sequence is accumulated into.
+#          v
+#        0=storage |---Q2D------>|--------D2C------------------>| this is normal output but will complain about requeues
+#        1=host    |---Q2D----------------------->|---D2C------>| if host centric output mode selected, will still complain
+#        show D2D  |---Q2D------>|---D2D--------->|---D2C------>| best, host view Q2D reflects host time, D2C reflects storage
+#                                                                 and D2D time kept separate.
+#
+# ======================================================================================= 
+# 
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   1:  1   0.000000000   -.----      0.009435     23.549326 % 99     23.558761   3     1867 W      16      763360912             0 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @ 0.024124329 w/Q:27 D:3 C:3
+ %I-IMBarrier IO @ 0.024124474 w/Q:27 D:3 C:3
+ %I-IMBarrier IO @ 0.024126502 w/Q:28 D:3 C:3
+ %I-IMBarrier IO @ 0.024133625 w/Q:28 D:3 C:3
+ %I-IMBarrier IO @ 0.024899010 w/Q:28 D:4 C:3
+ %I-IMBarrier IO @ 0.024903271 w/Q:28 D:4 C:3
+ %I-IMBarrier IO @ 0.026215611 w/Q:32 D:7 C:7
+ %I-IMBarrier IO @ 0.026215759 w/Q:32 D:7 C:7
+ %I-IMBarrier IO @ 0.026216720 w/Q:33 D:7 C:7
+ %I-IMBarrier IO @ 0.026219949 w/Q:33 D:7 C:7
+ %I-IMBarrier IO @ 0.026612073 w/Q:33 D:8 C:7
+ %I-IMBarrier IO @ 0.026615634 w/Q:33 D:8 C:7
+  0|   2:  2   0.023997320   -.----      0.004829      0.096086 % 95      0.100915   3     1867 WS     88      592294352    -171066576 [dmcrypt_write/2]        0  11:  8,  8,  8,  8,  8,
+  0|   1:  1   0.023981117   -.----      0.015704      0.108836 % 87      0.124540   3     1867 WS    112      592294240          -200 [dmcrypt_write/2]        0  14:  8,  8,  8,  8,  8,
+  0|   1:  1   0.024124329   -.----      0.009296      0.769646 % 98      0.778942  11     1889 FWFS    0      575480360     -16813992 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1   0.025209376   -.----      0.002602      0.457439 % 99      0.460041   3     1867 WFS     8      592294440      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1   0.026018983   -.----      0.001698      0.069154 % 97      0.070852   3     1867 WS      8      763360920     171066472 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @ 0.027732775 w/Q:39 D:13 C:13
+ %I-IMBarrier IO @ 0.027732901 w/Q:39 D:13 C:13
+ %I-IMBarrier IO @ 0.027733760 w/Q:40 D:13 C:13
+ %I-IMBarrier IO @ 0.027736859 w/Q:40 D:13 C:13
+ %I-IMBarrier IO @ 0.028145849 w/Q:40 D:14 C:13
+ %I-IMBarrier IO @ 0.028146321 w/Q:40 D:14 C:13
+  0|   1:  1   0.026192416   -.----      0.002857      0.011887 % 80      0.014744   3     1867 WS     16      592294448    -171066480 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @ 2.128390708 w/Q:41 D:15 C:15
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:     0 totals         0.000        0.046       25.062 % 99        25.109      7   35          124    0:   546827800    0   0
+#SEC:     0 tot.avg        0.000        0.007        3.580 % 99         3.587      7   35           17    0:    78118257
+#SEC:     0 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     0 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     0 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     0 writes         0.000        0.007       25.062 % 99        25.109      7   35          124    0
+#SEC:     0 wr.avg         0.000        0.007        3.580 % 99         3.587      7   35          124    0
+#SEC:     0 wr.max         0.000        0.016       23.549 % 99        23.559 
+#SEC:     0 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     0 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     0 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     0 idle         972.847ms (idle:% 97.28, busy:%  2.72)
+#SEC@MM:SS|  tot/s    r/s    w/s    d/s|   tkB/s   rkB/s   wkB/s   dkB/s|    avrq  qusz:max |    await:disk |  r_await:disk |  w_await:disk | d_await:disk  | Eff.   |  %busy | #reQ #Slp #Bar
+#SEC@-----|-------+------+------+------|--------+-------+-------+-------|--------+-----:----|---------:-----|---------:-----|---------:-----|---------:-----|--------|--------|-----+----+----+
+#SEC@00:00|      7      0      7      0|     124       0     124       0|   35.43   1.9   3 |     3.59 100% |     0.00   0% |     3.59 100% |     0.00   0% |  27.15 |   2.72 |    0    0    4
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        4 writes,    0 discards), this can significantly slow down perceived storage response time! (@    0 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+ %I-IMBarrier IO @ 2.128390821 w/Q:41 D:15 C:15
+ %I-IMBarrier IO @ 2.128394855 w/Q:42 D:15 C:15
+ %I-IMBarrier IO @ 2.128404142 w/Q:42 D:15 C:15
+ %I-IMBarrier IO @ 2.152023442 w/Q:42 D:16 C:15
+  0|   1:  1   0.026215611   -.----      0.004338      0.395685 % 98      0.400023  11     1889 FWFS    0      575480384     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1   0.026746477   -.----      0.001817      0.393510 % 99      0.395327   3     1867 WFS     8      592294464      16814080 [dmcrypt_write/2]        0   0
+  0|   3:  3   0.027360014   -.----      0.003153      0.073480 % 95      0.076633   3     1867 WS      8      681672496      89378024 [dmcrypt_write/2]        0   0
+  0|   2:  2   0.027361727   -.----      0.001360      0.077352 % 98      0.078712   3     1867 WS      8      683226384       1553880 [dmcrypt_write/2]        0   0
+  0|   1:  1   0.027362340   -.----      0.000583      0.078784 % 99      0.079367   3     1867 WS      8      683255840         29448 [dmcrypt_write/2]        0   0
+  0|   1:  1   0.027649795   -.----      0.002850      0.068307 % 95      0.071157   3     1867 WS     16      592294472     -90961376 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   1:  1   0.027732775   -.----      0.004084      0.409462 % 99      0.413546  11     1889 FWFS    0      575480408     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1   0.028191091   -.----      0.001912      0.359064 % 99      0.360976   3     1867 WFS     8      592294488      16814080 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @ 2.152032263 w/Q:42 D:16 C:15
+  0|   1:  1   2.128390708   -.----      0.013434     23.628121 % 99     23.641555   6  1390665 FWS     0           2048    -592292448 [kworker/u24:6]          0   0: [BARRIER]
+ %I-IMBarrier IO @ 2.152241827 w/Q:42 D:16 C:16
+ %I-IMBarrier IO @ 2.152242126 w/Q:42 D:16 C:16
+ %I-IMBarrier IO @ 2.152246022 w/Q:43 D:16 C:16
+ %I-IMBarrier IO @ 2.152253196 w/Q:43 D:16 C:16
+ %I-IMBarrier IO @ 2.152370129 w/Q:43 D:17 C:16
+ %I-IMBarrier IO @ 2.152371080 w/Q:43 D:17 C:16
+  0|   1:  1   2.152241827   -.----      0.011369      0.117884 % 91      0.129253   0  1388792 FWFSM    0       67137916      67135868 [kworker/0:0]            0   0: [BARRIER]
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:     2 totals         0.000        0.045       25.602 % 99        25.647     10    5           28    0:   908607364    0   0
+#SEC:     2 tot.avg        0.000        0.004        2.560 % 99         2.565     10    5            2    0:    90860736
+#SEC:     2 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     2 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     2 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     2 writes         0.000        0.004       25.602 % 99        25.647     10    5           28    0
+#SEC:     2 wr.avg         0.000        0.004        2.560 % 99         2.565     10    5           28    0
+#SEC:     2 wr.max         0.000        0.013       23.628 % 99        23.642 
+#SEC:     2 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     2 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     2 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     2 idle         975.099ms (idle:% 97.51, busy:%  2.49)
+#SEC@00:02|     10      0     10      0|      28       0      28       0|    5.60   1.0   1 |     2.56 100% |     0.00   0% |     2.56 100% |     0.00   0% |  24.90 |   2.49 |    0    0    1
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        1 writes,    0 discards), this can significantly slow down perceived storage response time! (@    2 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   1:  1   2.152592577   -.----      0.015065      1.114943 % 98      1.130008   9     1400 WFSM   12       83951996      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1   5.002708129   -.----      0.011828     23.513937 % 99     23.525765   3     1867 W      16      763360928     679408920 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @ 5.027073014 w/Q:59 D:21 C:21
+ %I-IMBarrier IO @ 5.027074128 w/Q:59 D:21 C:21
+ %I-IMBarrier IO @ 5.027077378 w/Q:60 D:21 C:21
+ %I-IMBarrier IO @ 5.027084885 w/Q:60 D:21 C:21
+ %I-IMBarrier IO @ 5.027852186 w/Q:60 D:22 C:21
+ %I-IMBarrier IO @ 5.027859859 w/Q:60 D:22 C:21
+ %I-IMBarrier IO @ 5.029371337 w/Q:64 D:25 C:25
+ %I-IMBarrier IO @ 5.029371477 w/Q:64 D:25 C:25
+ %I-IMBarrier IO @ 5.029373458 w/Q:65 D:25 C:25
+ %I-IMBarrier IO @ 5.029380136 w/Q:65 D:25 C:25
+ %I-IMBarrier IO @ 5.029910104 w/Q:65 D:26 C:25
+ %I-IMBarrier IO @ 5.029915295 w/Q:65 D:26 C:25
+  0|   2:  2   5.026863728   -.----      0.019248      0.088781 % 82      0.108029   3     1867 WS     96      592294496    -171066448 [dmcrypt_write/2]        0  12:  8,  8,  8,  8,  8,
+  0|   1:  1   5.026881053   -.----      0.000724      0.098239 % 99      0.098963   3     1867 WS      8      682934664      90640072 [dmcrypt_write/2]        0   0
+  0|   1:  1   5.027073014   -.----      0.011871      0.774974 % 98      0.786845  11     1889 FWFS    0      575480512    -107454160 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1   5.028111936   -.----      0.004945      0.416273 % 98      0.421218   3     1867 WFS     8      592294592      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1   5.028980475   -.----      0.001884      0.069615 % 97      0.071499   3     1867 WS      8      763360936     171066336 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @ 5.030909948 w/Q:71 D:32 C:32
+ %I-IMBarrier IO @ 5.030910059 w/Q:71 D:32 C:32
+ %I-IMBarrier IO @ 5.030911588 w/Q:72 D:32 C:32
+ %I-IMBarrier IO @ 5.030916867 w/Q:72 D:32 C:32
+ %I-IMBarrier IO @ 5.031351180 w/Q:72 D:33 C:32
+  0|   1:  1   5.029204162   -.----      0.002858      0.086177 % 96      0.089035   3     1867 WS     16      592294600    -171066344 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @ 5.031351649 w/Q:72 D:33 C:32
+  0|   1:  1   5.029371337   -.----      0.008799      0.535159 % 98      0.543958  11     1889 FWFS    0      575480536     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1   5.030038829   -.----      0.005120      0.410195 % 98      0.415315   3     1867 WFS     8      592294616      16814080 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:     5 totals         0.000        0.082       27.108 % 99        27.191     10   17           86    0:  1457958600    0   0
+#SEC:     5 tot.avg        0.000        0.008        2.711 % 99         2.719     10   17            8    0:   145795860
+#SEC:     5 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     5 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     5 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     5 writes         0.000        0.008       27.108 % 99        27.191     10   17           86    0
+#SEC:     5 wr.avg         0.000        0.008        2.711 % 99         2.719     10   17           86    0
+#SEC:     5 wr.max         0.000        0.019       23.514 % 99        23.526 
+#SEC:     5 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     5 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     5 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     5 idle         973.188ms (idle:% 97.32, busy:%  2.68)
+#SEC@00:05|     10      0     10      0|      86       0      86       0|   17.20   1.0   3 |     2.72 100% |     0.00   0% |     2.72 100% |     0.00   0% |  26.81 |   2.68 |    0    0    3
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        3 writes,    0 discards), this can significantly slow down perceived storage response time! (@    5 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   3:  3   5.030729556   -.----      0.003109      0.010398 % 76      0.013507   3     1867 WS      8      681672496      89377872 [dmcrypt_write/2]        0   0
+  0|   2:  2   5.030731265   -.----      0.001347      0.013739 % 91      0.015086   3     1867 WS      8      683226384       1553880 [dmcrypt_write/2]        0   0
+  0|   1:  1   5.030731833   -.----      0.000570      0.014563 % 96      0.015133   3     1867 WS      8      683255840         29448 [dmcrypt_write/2]        0   0
+  0|   2:  2   5.030850302   -.----      0.000387      0.007843 % 95      0.008230   3     1867 WS      8      592294624     -90961224 [dmcrypt_write/2]        0   0
+  0|   1:  1   5.030852511   -.----      0.000291      0.012551 % 97      0.012842   3     1867 WS      8      592294632             0 [dmcrypt_write/2]        0   0
+  0|   1:  1   5.030909948   -.----      0.006919      0.434782 % 98      0.441701  11     1889 FWFS    0      575480560     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1   5.031399929   -.----      0.000841      0.366806 % 99      0.367647   3     1867 WFS     8      592294640      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1   9.155737170   -.----      0.008482     23.591697 % 99     23.600179   3     1867 W     160      685546512      93251864 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:     9 totals         0.000        0.022       24.452 % 99        24.474      8   26          104    0:   308802448    0   0
+#SEC:     9 tot.avg        0.000        0.003        3.057 % 99         3.059      8   26           13    0:    38600306
+#SEC:     9 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     9 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     9 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     9 writes         0.000        0.003       24.452 % 99        24.474      8   26          104    0
+#SEC:     9 wr.avg         0.000        0.003        3.057 % 99         3.059      8   26          104    0
+#SEC:     9 wr.max         0.000        0.008       23.592 % 99        23.600 
+#SEC:     9 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     9 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:     9 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:     9 idle         976.400ms (idle:% 97.64, busy:%  2.36)
+#SEC@00:09|      8      0      8      0|     104       0     104       0|   26.00   1.0   1 |     3.06 100% |     0.00   0% |     3.06 100% |     0.00   0% |  23.60 |   2.36 |    0    0    0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  1|   1:  1  10.005549483   -.----      0.009047      1.012174 % 99      1.021221   3     1867 W      16      763360944      77814272 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   5:  4  10.006676586   -.----      0.002204      0.009418 % 81      0.011622   3     1867 WS      8      592294648    -171066312 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @10.006938316 w/Q:93 D:47 C:47
+ %I-IMBarrier IO @10.006938446 w/Q:93 D:47 C:47
+ %I-IMBarrier IO @10.006940562 w/Q:94 D:47 C:47
+ %I-IMBarrier IO @10.006948310 w/Q:94 D:47 C:47
+ %I-IMBarrier IO @10.007786029 w/Q:94 D:48 C:47
+ %I-IMBarrier IO @10.007793268 w/Q:94 D:48 C:47
+  0|   7:  7  10.006681513   -.----      0.000515      0.015073 % 96      0.015588   3     1867 WS      8      592294672            16 [dmcrypt_write/2]        0   0
+  0|   6:  6  10.006679385   -.----      0.001743      0.017219 % 90      0.018962   3     1867 WS     16      592294656           -24 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   5:  5  10.006682476   -.----      0.000448      0.017545 % 97      0.017993   3     1867 WS      8      592294680             8 [dmcrypt_write/2]        0   0
+  0|   6:  5  10.006690581   -.----      0.001513      0.010879 % 87      0.012392   3     1867 WS     16      592294704            16 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   5:  4  10.006686622   -.----      0.003574      0.013859 % 79      0.017433   3     1867 WS     16      592294688           -32 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   4:  3  10.006692461   -.----      0.000485      0.012402 % 96      0.012887   3     1867 WS      8      592294720            16 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @10.009079514 w/Q:98 D:52 C:52
+ %I-IMBarrier IO @10.009079625 w/Q:98 D:52 C:52
+ %I-IMBarrier IO @10.009081530 w/Q:99 D:52 C:52
+ %I-IMBarrier IO @10.009087250 w/Q:99 D:52 C:52
+ %I-IMBarrier IO @10.009594484 w/Q:99 D:53 C:52
+ %I-IMBarrier IO @10.009601874 w/Q:99 D:53 C:52
+  0|   4:  4  10.006696217   -.----      0.005381      0.008497 % 61      0.013878   3     1867 WS      8      592294736             8 [dmcrypt_write/2]        0   0
+  0|   3:  3  10.006694316   -.----      0.000501      0.015771 % 96      0.016272   3     1867 WS      8      592294728           -16 [dmcrypt_write/2]        0   0
+  0|   2:  2  10.006701967   -.----      0.006447      0.075152 % 92      0.081599   3     1867 WS     24      592294744             8 [dmcrypt_write/2]        0   3:  8,  8,  8.
+  0|   1:  1  10.006708679   -.----      0.000725      0.153732 % 99      0.154457   3     1867 WS     16      592294768             0 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   1:  1  10.006938316   -.----      0.009994      0.844958 % 98      0.854952  11     1889 FWFS    0      575480704     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  10.008024544   -.----      0.014929      0.451996 % 96      0.466925   3     1867 WFS     8      592294784      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  10.008895556   -.----      0.014416      0.014135 % 49      0.028551   3     1867 WS      8      763360952     171066160 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @10.010404464 w/Q:105 D:59 C:59
+ %I-IMBarrier IO @10.010404572 w/Q:105 D:59 C:59
+ %I-IMBarrier IO @10.010405867 w/Q:106 D:59 C:59
+ %I-IMBarrier IO @10.010410793 w/Q:106 D:59 C:59
+ %I-IMBarrier IO @10.010895747 w/Q:106 D:60 C:59
+  0|   2:  2  10.009018772   -.----      0.000468      0.007764 % 94      0.008232   3     1867 WS      8      592294800    -171066160 [dmcrypt_write/2]        0   0
+  0|   1:  1  10.009017858   -.----      0.000571      0.010277 % 94      0.010848   3     1867 WS      8      592294792           -16 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @10.010896213 w/Q:106 D:60 C:59
+  0|   1:  1  10.009079514   -.----      0.007736      0.514624 % 98      0.522360  11     1889 FWFS    0      575480728     -16814072 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  10.009679817   -.----      0.008601      0.371567 % 97      0.380168   3     1867 WFS     8      592294808      16814080 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    10 totals         0.000        0.089        3.577 % 97         3.666     19   10           96    0:   658269376    0   0
+#SEC:    10 tot.avg        0.000        0.005        0.188 % 97         0.193     19   10            5    0:    34645756
+#SEC:    10 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    10 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    10 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    10 writes         0.000        0.005        3.577 % 97         3.666     19   10           96    0
+#SEC:    10 wr.avg         0.000        0.005        0.188 % 97         0.193     19   10           96    0
+#SEC:    10 wr.max         0.000        0.015        1.012 % 99         1.021 
+#SEC:    10 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    10 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    10 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    10 idle         995.636ms (idle:% 99.56, busy:%  0.44)
+#SEC@00:10|     19      0     19      0|      96       0      96       0|   10.11   1.0   7 |     0.19  98% |     0.00   0% |     0.19  98% |     0.00   0% |   4.36 |   0.44 |    0    0    3
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        3 writes,    0 discards), this can significantly slow down perceived storage response time! (@   10 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   3:  3  10.010233616   -.----      0.000574      0.007667 % 93      0.008241   3     1867 WS      8      681672496      89377680 [dmcrypt_write/2]        0   0
+  0|   2:  2  10.010237564   -.----      0.000467      0.007075 % 93      0.007542   3     1867 WS      8      683226384       1553880 [dmcrypt_write/2]        0   0
+  0|   1:  1  10.010235522   -.----      0.000498      0.009656 % 95      0.010154   3     1867 WS      8      683255840         29448 [dmcrypt_write/2]        0   0
+  0|   2:  2  10.010363194   -.----      0.000506      0.007519 % 93      0.008025   3     1867 WS      8      592294824     -90961024 [dmcrypt_write/2]        0   0
+  0|   1:  1  10.010365142   -.----      0.000280      0.013231 % 97      0.013511   3     1867 WS      8      592294816           -16 [dmcrypt_write/2]        0   0
+  0|   1:  1  10.010404464   -.----      0.006329      0.485420 % 98      0.491749  11     1889 FWFS    0      575480752     -16814072 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  10.010940389   -.----      0.000522      0.372419 % 99      0.372941   3     1867 WFS     8      592294832      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  15.007955675   -.----      0.010275     23.651095 % 99     23.661370   3     1867 W      16      763360960     171066120 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @15.032195754 w/Q:121 D:63 C:63
+ %I-IMBarrier IO @15.032195933 w/Q:121 D:63 C:63
+ %I-IMBarrier IO @15.032198426 w/Q:122 D:63 C:63
+ %I-IMBarrier IO @15.032205401 w/Q:122 D:63 C:63
+ %I-IMBarrier IO @15.033044387 w/Q:122 D:64 C:63
+ %I-IMBarrier IO @15.033051548 w/Q:122 D:64 C:63
+ %I-IMBarrier IO @15.034555201 w/Q:126 D:68 C:68
+ %I-IMBarrier IO @15.034555333 w/Q:126 D:68 C:68
+ %I-IMBarrier IO @15.034557194 w/Q:127 D:68 C:68
+ %I-IMBarrier IO @15.034563509 w/Q:127 D:68 C:68
+ %I-IMBarrier IO @15.035077065 w/Q:127 D:69 C:68
+ %I-IMBarrier IO @15.035082058 w/Q:127 D:69 C:68
+  0|   1:  1  15.032086741   -.----      0.012004      0.078192 % 86      0.090196   3     1867 WS     96      592294840    -171066136 [dmcrypt_write/2]        0  12:  8,  8,  8,  8,  8,
+  0|   1:  1  15.032195754   -.----      0.009647      0.846147 % 98      0.855794  10     1889 FWFS    0      575480856     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  15.033296161   -.----      0.002839      0.536184 % 99      0.539023   3     1867 WFS     8      592294936      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  15.034246238   -.----      0.002198      0.085822 % 97      0.088020   3     1867 WS      8      763360968     171066024 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @15.035966445 w/Q:133 D:75 C:75
+ %I-IMBarrier IO @15.035966582 w/Q:133 D:75 C:75
+ %I-IMBarrier IO @15.035968594 w/Q:134 D:75 C:75
+ %I-IMBarrier IO @15.035975443 w/Q:134 D:75 C:75
+ %I-IMBarrier IO @15.036447307 w/Q:134 D:76 C:75
+  0|   2:  2  15.034441520   -.----      0.000416      0.067648 % 99      0.068064   3     1867 WS      8      592294952    -171066024 [dmcrypt_write/2]        0   0
+  0|   1:  1  15.034438617   -.----      0.002442      0.071572 % 96      0.074014   3     1867 WS      8      592294944           -16 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @15.036451780 w/Q:134 D:76 C:75
+  0|   1:  1  15.034555201   -.----      0.008308      0.518549 % 98      0.526857  10     1889 FWFS    0      575480880     -16814072 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  15.035163086   -.----      0.002417      0.380145 % 99      0.382562   3     1867 WFS     8      592294960      16814080 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    15 totals         0.000        0.060       27.138 % 99        27.198     16   12          100    0:   967070832    0   0
+#SEC:    15 tot.avg        0.000        0.004        1.696 % 99         1.700     16   12            6    0:    60441927
+#SEC:    15 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    15 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    15 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    15 writes         0.000        0.004       27.138 % 99        27.198     16   12          100    0
+#SEC:    15 wr.avg         0.000        0.004        1.696 % 99         1.700     16   12          100    0
+#SEC:    15 wr.max         0.000        0.012       23.651 % 99        23.661 
+#SEC:    15 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    15 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    15 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    15 idle         972.880ms (idle:% 97.29, busy:%  2.71)
+#SEC@00:15|     16      0     16      0|     100       0     100       0|   12.50   1.0   3 |     1.70 100% |     0.00   0% |     1.70 100% |     0.00   0% |  27.12 |   2.71 |    0    0    3
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        3 writes,    0 discards), this can significantly slow down perceived storage response time! (@   15 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   3:  3  15.035769878   -.----      0.000708      0.007967 % 91      0.008675   3     1867 WS      8      683255840      90960872 [dmcrypt_write/2]        0   0
+  0|   2:  2  15.035771087   -.----      0.000290      0.010214 % 97      0.010504   3     1867 WS      8      683226384        -29464 [dmcrypt_write/2]        0   0
+  0|   1:  1  15.035768148   -.----      0.002651      0.011568 % 81      0.014219   3     1867 WS      8      681672496      -1553896 [dmcrypt_write/2]        0   0
+  0|   2:  2  15.035902463   -.----      0.000298      0.007894 % 96      0.008192   3     1867 WS      8      592294968     -89377536 [dmcrypt_write/2]        0   0
+  0|   1:  1  15.035901501   -.----      0.000403      0.009229 % 95      0.009632   3     1867 WS      8      592294976             0 [dmcrypt_write/2]        0   0
+  0|   1:  1  15.035966445   -.----      0.008998      0.476337 % 98      0.485335  11     1889 FWFS    0      575480904     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  15.036536478   -.----      0.006944      0.385926 % 98      0.392870   3     1867 WFS     8      592294984      16814080 [dmcrypt_write/2]        0   0
+  0|   2:  2  19.136878669   -.----      0.005656     13.517263 % 99     13.522919   3     1867 W     160      685545472      93250480 [dmcrypt_write/2]        0   0
+  0|   1:  1  19.126830932   -.----      0.009226     23.567805 % 99     23.577031   3     1867 W     160      685324752       -220880 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    19 totals         0.000        0.035       37.994 % 99        38.029      9   40          184    0:   309021288    0   0
+#SEC:    19 tot.avg        0.000        0.004        4.222 % 99         4.225      9   40           20    0:    34335698
+#SEC:    19 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    19 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    19 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    19 writes         0.000        0.004       37.994 % 99        38.029      9   40          184    0
+#SEC:    19 wr.avg         0.000        0.004        4.222 % 99         4.225      9   40          184    0
+#SEC:    19 wr.max         0.000        0.009       23.568 % 99        23.577 
+#SEC:    19 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    19 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    19 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    19 idle         976.423ms (idle:% 97.64, busy:%  2.36)
+#SEC@00:19|      9      0      9      0|     184       0     184       0|   40.89   1.6   2 |     4.23 100% |     0.00   0% |     4.23 100% |     0.00   0% |  23.58 |   2.36 |    0    0    0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   1:  1  20.010267162   -.----      0.009462      1.080410 % 99      1.089872   3     1867 W      16      763360976      78036064 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   4:  4  20.011530157   -.----      0.003329      0.010655 % 76      0.013984   3     1867 WS      8      592294992    -171066000 [dmcrypt_write/2]        0   0
+  0|   3:  3  20.011537932   -.----      0.000541      0.009040 % 94      0.009581   3     1867 WS      8      592295024            24 [dmcrypt_write/2]        0   0
+  0|   2:  2  20.011534188   -.----      0.003333      0.010504 % 75      0.013837   3     1867 WS     24      592295000           -32 [dmcrypt_write/2]        0   3:  8,  8,  8.
+  0|   1:  1  20.011538876   -.----      0.000383      0.011118 % 96      0.011501   3     1867 WS      8      592295032             8 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.011804378 w/Q:156 D:89 C:89
+ %I-IMBarrier IO @20.011804513 w/Q:156 D:89 C:89
+ %I-IMBarrier IO @20.011806578 w/Q:157 D:89 C:89
+ %I-IMBarrier IO @20.011814584 w/Q:157 D:89 C:89
+ %I-IMBarrier IO @20.012369182 w/Q:157 D:90 C:89
+ %I-IMBarrier IO @20.012370213 w/Q:157 D:90 C:89
+  0|   4:  4  20.011551824   -.----      0.002641      0.014034 % 84      0.016675   3     1867 WS     32      592295040             0 [dmcrypt_write/2]        0   4:  8,  8,  8,  8.
+  0|   3:  3  20.011557062   -.----      0.000480      0.021431 % 97      0.021911   3     1867 WS      8      592295096            24 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.013637841 w/Q:161 D:94 C:94
+ %I-IMBarrier IO @20.013637979 w/Q:161 D:94 C:94
+ %I-IMBarrier IO @20.013640449 w/Q:162 D:94 C:94
+ %I-IMBarrier IO @20.013645940 w/Q:162 D:94 C:94
+ %I-IMBarrier IO @20.014118188 w/Q:162 D:95 C:94
+  0|   2:  2  20.011556212   -.----      0.000440      0.023081 % 98      0.023521   3     1867 WS      8      592295088           -16 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.011554823   -.----      0.000978      0.024463 % 96      0.025441   3     1867 WS     16      592295072           -24 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @20.014124992 w/Q:162 D:95 C:94
+  0|   1:  1  20.011642708   -.----      0.006859      0.064386 % 90      0.071245   5     1867 WS     24      592295104            16 [dmcrypt_write/2]        0   3:  8,  8,  8.
+  0|   1:  1  20.011804378   -.----      0.010206      0.555629 % 98      0.565835  11     1889 FWFS    0      575481048     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  20.012629348   -.----      0.002549      0.440514 % 99      0.443063   3     1867 WFS     8      592295128      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.013429033   -.----      0.016641      0.014043 % 45      0.030684   3     1867 WS      8      763360984     171065848 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.015023366 w/Q:168 D:101 C:101
+ %I-IMBarrier IO @20.015023477 w/Q:168 D:101 C:101
+ %I-IMBarrier IO @20.015025117 w/Q:169 D:101 C:101
+ %I-IMBarrier IO @20.015030007 w/Q:169 D:101 C:101
+ %I-IMBarrier IO @20.015733358 w/Q:169 D:102 C:101
+  0|   2:  2  20.013576456   -.----      0.000406      0.007568 % 94      0.007974   3     1867 WS      8      592295136    -171065856 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.013579348   -.----      0.000295      0.007724 % 96      0.008019   3     1867 WS      8      592295144             0 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.015737765 w/Q:169 D:102 C:101
+  0|   1:  1  20.013637841   -.----      0.008099      0.479052 % 98      0.487151  11     1889 FWFS    0      575481072     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  20.014285431   -.----      0.007516      0.349971 % 97      0.357487   3     1867 WFS     8      592295152      16814080 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.134631956 w/Q:170 D:103 C:103
+ %I-IMBarrier IO @20.134632725 w/Q:170 D:103 C:103
+ %I-IMBarrier IO @20.134636514 w/Q:171 D:103 C:103
+ %I-IMBarrier IO @20.134642393 w/Q:171 D:103 C:103
+ %I-IMBarrier IO @20.135694774 w/Q:171 D:104 C:103
+  0|   3:  3  20.014866612   -.----      0.000263      0.010599 % 97      0.010862   3     1867 WS      8      683255840      90960680 [dmcrypt_write/2]        0   0
+  0|   2:  2  20.014863755   -.----      0.000328      0.013853 % 97      0.014181   3     1867 WS      8      681672496      -1583352 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.014869098   -.----      0.000305      0.017147 % 98      0.017452   3     1867 WS      8      683226384       1553880 [dmcrypt_write/2]        0   0
+  0|   2:  2  20.014967217   -.----      0.000355      0.007582 % 95      0.007937   3     1867 WS      8      592295160     -90931232 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.014969819   -.----      0.000274      0.008753 % 96      0.009027   3     1867 WS      8      592295168             0 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.015023366   -.----      0.006641      0.707758 % 99      0.714399  11     1889 FWFS    0      575481096     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  20.015891388   -.----      0.004528      0.346860 % 98      0.351388   3     1867 WFS     8      592295176      16814080 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.135699076 w/Q:171 D:104 C:103
+  0|   1:  1  20.134631956   -.----      0.010437      1.056683 % 99      1.067120   2  1389975 FWS     0      167774208    -424520976 [DOMCacheThread]         0   0: [BARRIER]
+  0|   1:  1  20.135899820   -.----      0.003518      0.009505 % 72      0.013023   3     1867 WS      8      683393616     515619408 [dmcrypt_write/2]        0   0
+  0|   4:  4  20.136058171   -.----      0.000372      0.007937 % 95      0.008309   3     1867 WS      8      592295184     -91098440 [dmcrypt_write/2]        0   0
+  0|   6:  6  20.136063193   -.----      0.000330      0.010940 % 97      0.011270   3     1867 WS      8      592295200             8 [dmcrypt_write/2]        0   0
+  0|   5:  5  20.136060719   -.----      0.000299      0.013945 % 97      0.014244   3     1867 WS      8      592295192           -16 [dmcrypt_write/2]        0   0
+  0|   5:  4  20.136065605   -.----      0.000293      0.011375 % 97      0.011668   3     1867 WS      8      592295208             8 [dmcrypt_write/2]        0   0
+  0|   5:  5  20.136070591   -.----      0.000324      0.009107 % 96      0.009431   3     1867 WS      8      592295224             8 [dmcrypt_write/2]        0   0
+  0|   4:  4  20.136068565   -.----      0.000300      0.011563 % 97      0.011863   3     1867 WS      8      592295216           -16 [dmcrypt_write/2]        0   0
+  0|   4:  3  20.136072987   -.----      0.000361      0.009152 % 96      0.009513   3     1867 WS      8      592295232             8 [dmcrypt_write/2]        0   0
+  0|   4:  4  20.136078460   -.----      0.000306      0.006743 % 95      0.007049   3     1867 WS      8      592295248             8 [dmcrypt_write/2]        0   0
+  0|   3:  3  20.136076747   -.----      0.001376      0.007852 % 85      0.009228   3     1867 WS      8      592295240           -16 [dmcrypt_write/2]        0   0
+  0|   3:  3  20.136083445   -.----      0.000326      0.010909 % 97      0.011235   3     1867 WS      8      592295264            16 [dmcrypt_write/2]        0   0
+  0|   2:  2  20.136081580   -.----      0.001592      0.011917 % 88      0.013509   3     1867 WS      8      592295256           -16 [dmcrypt_write/2]        0   0
+  0|   1:  1  20.136086849   -.----      0.000299      0.016299 % 98      0.016598   3     1867 WS      8      592295272             8 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @20.136113492 w/Q:184 D:117 C:117
+ %I-IMBarrier IO @20.136113666 w/Q:184 D:117 C:117
+ %I-IMBarrier IO @20.136116333 w/Q:185 D:117 C:117
+ %I-IMBarrier IO @20.136122320 w/Q:185 D:117 C:117
+ %I-IMBarrier IO @20.136630345 w/Q:185 D:118 C:117
+ %I-IMBarrier IO @20.136634602 w/Q:185 D:118 C:117
+  0|   1:  1  20.136113492   -.----      0.008828      0.512282 % 98      0.521110  11     1889 FWFS    0      575481200     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    20 totals         0.000        0.116        5.942 % 98         6.058     39    8          172    0:  1925200568    0   0
+#SEC:    20 tot.avg        0.000        0.003        0.152 % 98         0.155     39    8            4    0:    49364117
+#SEC:    20 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    20 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    20 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    20 writes         0.000        0.003        5.942 % 98         6.058     39    8          172    0
+#SEC:    20 wr.avg         0.000        0.003        0.152 % 98         0.155     39    8          172    0
+#SEC:    20 wr.max         0.000        0.017        1.080 % 99         1.090 
+#SEC:    20 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    20 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    20 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    20 idle         993.779ms (idle:% 99.38, busy:%  0.62)
+#SEC@00:20|     39      0     39      0|     172       0     172       0|    8.82   1.0   6 |     0.16  98% |     0.00   0% |     0.16  98% |     0.00   0% |   6.22 |   0.62 |    0    0    5
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        5 writes,    0 discards), this can significantly slow down perceived storage response time! (@   20 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   1:  1  20.136838610   -.----      0.007035      0.362146 % 98      0.369181   3     1867 WFS     8      592295280      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  22.718858940   -.----      0.008108     23.456547 % 99     23.464655   3     1867 W       8      763676720     171381432 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    22 totals         0.000        0.015       23.819 % 99        23.834      2    8            8    0:   188195512    0   0
+#SEC:    22 tot.avg        0.000        0.008       11.909 % 99        11.917      2    8            4    0:    94097756
+#SEC:    22 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    22 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    22 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    22 writes         0.000        0.008       23.819 % 99        23.834      2    8            8    0
+#SEC:    22 wr.avg         0.000        0.008       11.909 % 99        11.917      2    8            8    0
+#SEC:    22 wr.max         0.000        0.008       23.457 % 99        23.465 
+#SEC:    22 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    22 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    22 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    22 idle         976.535ms (idle:% 97.65, busy:%  2.35)
+#SEC@00:22|      2      0      2      0|       8       0       8       0|    8.00   1.0   1 |    11.92 100% |     0.00   0% |    11.92 100% |     0.00   0% |  23.46 |   2.35 |    0    0    0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   1:  1  23.110926555   -.----      0.014647      1.138805 % 98      1.153452   5     1867 WS     56      759744832      -3931896 [dmcrypt_write/2]        0   0
+  0|   1:  1  23.112461549   -.----      0.007549      0.062476 % 89      0.070025   5     1867 WS      8      760126776        381888 [dmcrypt_write/2]        0   0
+  0|   4:  4  23.112561991   -.----      0.001217      0.057725 % 97      0.058942   5     1867 WS      8      592295448    -167831336 [dmcrypt_write/2]        0   0
+  0|   3:  3  23.112562613   -.----      0.000508      0.060264 % 99      0.060772   5     1867 WS      8      592295472            16 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @23.112682224 w/Q:213 D:126 C:126
+ %I-IMBarrier IO @23.112682398 w/Q:213 D:126 C:126
+ %I-IMBarrier IO @23.112685261 w/Q:214 D:126 C:126
+ %I-IMBarrier IO @23.112693628 w/Q:214 D:126 C:126
+ %I-IMBarrier IO @23.113341882 w/Q:214 D:127 C:126
+ %I-IMBarrier IO @23.113350329 w/Q:214 D:127 C:126
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    23 totals         0.000        0.024        1.319 % 98         1.343      4   20           40    0:   172145136    0   0
+#SEC:    23 tot.avg        0.000        0.006        0.330 % 98         0.336      4   20           10    0:    43036284
+#SEC:    23 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    23 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    23 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    23 writes         0.000        0.006        1.319 % 98         1.343      4   20           40    0
+#SEC:    23 wr.avg         0.000        0.006        0.330 % 98         0.336      4   20           40    0
+#SEC:    23 wr.max         0.000        0.015        1.139 % 98         1.153 
+#SEC:    23 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    23 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    23 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    23 idle         997.541ms (idle:% 99.75, busy:%  0.25)
+#SEC@00:23|      4      0      4      0|      40       0      40       0|   20.00   1.1   4 |     0.34  98% |     0.00   0% |     0.34  98% |     0.00   0% |   2.46 |   0.25 |    0    0    1
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        1 writes,    0 discards), this can significantly slow down perceived storage response time! (@   23 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC: no io present to summarize, cnt_reads=0 cnt_writes=0 cnt_discards=0
+#
+#PS|Prg :Flt   Queue(s)     Q2I(ms)   Q2D(ms)       D2C(ms)            Q2C(ms)     CPU      PID Typ  Size         Sector         Seek  Description            reQ Merges:sectors,...
+#--|----:--- ------------- -------- ------------- -------------+---- ------------- --- -------- ---- ---- -------------- ------------- ---------------------- --- ---:-----------------
+  0|   2:  2  23.112543800   -.----      0.017706      0.063264 % 78      0.080970   5     1867 WS    160      592295288          -192 [dmcrypt_write/2]        0  20:  8,  8,  8,  8,  8,
+  0|   1:  1  23.112557488   -.----      0.002673      0.074198 % 96      0.076871   5     1867 WS     16      592295456             8 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   1:  1  23.112682224   -.----      0.011404      0.656701 % 98      0.668105  11     1889 FWFS    0      575481400     -16814072 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  23.113487993   -.----      0.003543      0.473532 % 99      0.477075   5     1867 WFS     8      592295480      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  25.012611559   -.----      0.009974      1.118728 % 99      1.128702   3     1867 W      16      759744888     167449400 [dmcrypt_write/2]        0   2:  8,  8.
+ %I-IMBarrier IO @25.014031365 w/Q:234 D:130 C:130
+ %I-IMBarrier IO @25.014031525 w/Q:234 D:130 C:130
+ %I-IMBarrier IO @25.014033999 w/Q:235 D:130 C:130
+ %I-IMBarrier IO @25.014042468 w/Q:235 D:130 C:130
+ %I-IMBarrier IO @25.014568032 w/Q:235 D:131 C:130
+ %I-IMBarrier IO @25.014568572 w/Q:235 D:131 C:130
+ %I-IMBarrier IO @25.015567493 w/Q:239 D:134 C:134
+ %I-IMBarrier IO @25.015567648 w/Q:239 D:134 C:134
+ %I-IMBarrier IO @25.015569375 w/Q:240 D:134 C:134
+ %I-IMBarrier IO @25.015574736 w/Q:240 D:134 C:134
+ %I-IMBarrier IO @25.015968834 w/Q:240 D:135 C:134
+ %I-IMBarrier IO @25.015972938 w/Q:240 D:135 C:134
+  0|   1:  1  25.013970946   -.----      0.010619      0.029336 % 73      0.039955   3     1867 WS    136      592295488    -167449416 [dmcrypt_write/2]        0  17:  8,  8,  8,  8,  8,
+  0|   1:  1  25.014031365   -.----      0.011103      0.526104 % 97      0.537207  11     1889 FWFS    0      575481544     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  25.014670520   -.----      0.003334      0.463077 % 99      0.466411   4     1867 WFS     8      592295624      16814080 [dmcrypt_write/2]        0   0
+  0|   1:  1  25.015331918   -.----      0.002641      0.054229 % 95      0.056870   4     1867 WS      8      759744896     167449264 [dmcrypt_write/2]        0   0
+ %I-IMBarrier IO @25.016911200 w/Q:246 D:140 C:140
+ %I-IMBarrier IO @25.016911322 w/Q:246 D:140 C:140
+ %I-IMBarrier IO @25.016913126 w/Q:247 D:140 C:140
+ %I-IMBarrier IO @25.016918148 w/Q:247 D:140 C:140
+ %I-IMBarrier IO @25.017562173 w/Q:247 D:141 C:140
+ %I-IMBarrier IO @25.017566539 w/Q:247 D:141 C:140
+  0|   1:  1  25.015484242   -.----      0.003783      0.070968 % 94      0.074751   4     1867 WS     16      592295632    -167449272 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   1:  1  25.015567493   -.----      0.007243      0.398202 % 98      0.405445  11     1889 FWFS    0      575481568     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  25.016070000   -.----      0.003426      0.412310 % 99      0.415736   4     1867 WFS     8      592295648      16814080 [dmcrypt_write/2]        0   0
+  0|   3:  3  25.016699785   -.----      0.005680      0.063582 % 91      0.069262   4     1867 WS      8      681672496      89376840 [dmcrypt_write/2]        0   0
+  0|   2:  2  25.016702814   -.----      0.002529      0.067644 % 96      0.070173   4     1867 WS      8      683226384       1553880 [dmcrypt_write/2]        0   0
+  0|   1:  1  25.016703760   -.----      0.001240      0.069033 % 98      0.070273   4     1867 WS      8      683255840         29448 [dmcrypt_write/2]        0   0
+  0|   1:  1  25.016888688   -.----      0.003820      0.010305 % 72      0.014125   4     1867 WS     16      592295656     -90960192 [dmcrypt_write/2]        0   2:  8,  8.
+  0|   1:  1  25.016911200   -.----      0.006948      0.648391 % 98      0.655339  11     1889 FWFS    0      575481592     -16814080 [jbd2/dm-4-8]            0   0: [BARRIER]
+  0|   1:  1  25.017675457   -.----      0.010543      0.375871 % 97      0.386414   4     1867 WFS     8      592295672      16814080 [dmcrypt_write/2]        0   0
+
+#SEC: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SEC:    25 totals         0.000        0.118        5.575 % 97         5.694     18   23          212    0:   986230544    0   0
+#SEC:    25 tot.avg        0.000        0.007        0.310 % 97         0.316     18   23           11    0:    54790585
+#SEC:    25 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    25 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    25 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    25 writes         0.000        0.007        5.575 % 97         5.694     18   23          212    0
+#SEC:    25 wr.avg         0.000        0.007        0.310 % 97         0.316     18   23          212    0
+#SEC:    25 wr.max         0.000        0.018        1.119 % 99         1.129 
+#SEC:    25 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    25 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SEC:    25 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SEC:    25 idle          13.807ms (idle:%  1.38, busy:% 98.62)
+#SEC@00:25|     18      0     18      0|     212       0     212       0|   23.56   0.0   3 |     0.32  98% |     0.00   0% |     0.32  98% |     0.00   0% | 986.19 |  98.62 |    0    0    3
+#SEC: --- Alert ---------------------------------------------------------------------------------------------------------------
+#SEC: ALERT %W-IOBarrier events encountered (       0 reads,        3 writes,    0 discards), this can significantly slow down perceived storage response time! (@   25 secs)
+#SEC: -------------------------------------------------------------------------------------------------------------------------
+#
+
+# --- File Summary nvme0n1.blktrace.txt ----------------------------------------------------------------------
+
+#SUM: dTime(sec)         Q2I(ms)      Q2D(ms)      D2C(ms)      Q2C(ms;await) io_cnt avrq          KiB  reQ:       seeks prog flt
+#SUM:     0 totals         0.000        0.653        0.000 %  0       208.243    142   16         1154    0:  8428329468    0   0
+#SUM:     0 tot.avg        0.000        0.005        0.000 %  0         1.466    142   16            8    0:    59354432
+#SUM:     0 reads          0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SUM:     0 rd.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SUM:     0 rd.max         0.000        0.000        0.000 %  0         0.000 
+#SUM:     0 writes         0.000        0.005        0.000 %  0       208.243    142   16         1154    0
+#SUM:     0 wr.avg         0.000        0.005        0.000 %  0         1.466    142   16         1154    0
+#SUM:     0 wr.max         0.000        0.019        0.000 %  0        23.661 
+#SUM:     0 discard        0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SUM:     0 dx.avg         0.000        0.000        0.000 %  0         0.000      0    0            0    0
+#SUM:     0 dx.max         0.000        0.000        0.000 %  0         0.000 
+#SUM:     0 idle        24824.136ms (idle:%2482.41, busy:%-2382.41)
+#SUM@MM:SS|  tot/s    r/s    w/s    d/s|   tkB/s   rkB/s   wkB/s   dkB/s|    avrq  qusz:max |    await:disk |  r_await:disk |  w_await:disk | d_await:disk  | Eff.   |  %busy | #reQ #Slp #Bar
+#SUM@-----|-------+------+------+------|--------+-------+-------+-------|--------+-----:----|---------:-----|---------:-----|---------:-----|---------:-----|--------|--------|-----+----+----+
+#SUM@00:00|    142      0    142      0|    1154       0    1154       0|   16.25   0.0   7 |     1.47   0% |     0.00   0% |     1.47   0% |     0.00   0% |-23824.14 | -2382.41 |    0    0   23
+#SUM: 
+#SUM:|--------|---------|-----------------------|----------------------|
+#SUM:|   REMAP COUNTS   |  ______ Reads _______ |______ Writes _______ |
+#SUM:|   From |   To    |    Count      Sectors |   Count      Sectors |
+#SUM:|--------|---------|---------+-------------|---------+------------|
+#SUM: 253,  3  259,  0           0            0       245         2296
+#SUM: 259,  3  259,  0           0            0       225         2308
+#SUM: 253,  0  259,  0           0            0         3           12
+#
+#
+#
+#====================================================================================================
+#===== Stage Queue:      0 Remaining ================================================================
+#===== ActiveQueue:      0 Remaining ================================================================
+#====================================================================================================
+
+#
+# #CPU :  Started    Ended  Crossed
+#     0 :        1        2        0
+#     2 :        1        2        0
+#     3 :      156      100        0
+#     4 :       11        9        0
+#     5 :       30        8        0
+#     6 :        1        2        0
+#     9 :        1        1        0
+#    10 :        2        4        0
+#    11 :       18       36        0
+#
+#  Per IO
+#  Transfer     #IO
+#  Sectors        count Q2I       Total        Avg         Q2D       Total        Avg         Q2C       Total        Avg                'Size'
+#    0 -    7        23 Q2I:   -293.045602558/-12.741113155 Q2D:      0.000202031/ 0.000008784 Q2C:      0.036494581/ 0.001586721   16.2% Subpage (    <   1 4k page )
+#    8 -   31       108 Q2I:  -1543.914829172/-14.295507678 Q2D:      0.000330096/ 0.000003056 Q2C:      0.109333550/ 0.001012348   76.1% Small   (  1 -   3 4k pages)
+#   32 -   71         2 Q2I:    -43.122478379/-21.561239190 Q2D:      0.000017288/ 0.000008644 Q2C:      0.001170127/ 0.000585063    1.4% Medium  (  4 -   8 4k pages)
+#   72 -  263         9 Q2I:   -115.652890423/-12.850321158 Q2D:      0.000103474/ 0.000011497 Q2C:      0.061244734/ 0.006804970    6.3% Large   (  9 -  32 4k pages)
+#  264 - 1031         0 Q2I:      0.000000000/ 0.000000000 Q2D:      0.000000000/ 0.000000000 Q2C:      0.000000000/ 0.000000000    0.0% Jumbo   ( 33 - 128 4k pages)
+#      > 1031         0 Q2I:      0.000000000/ 0.000000000 Q2D:      0.000000000/ 0.000000000 Q2C:      0.000000000/ 0.000000000    0.0% Xtra    (    > 128 4k pages)
+#
+# Subpage and Small io sizes are typically inefficient (except on high iops devices like NVMe)
+# Medium io sizes are ok, but Large io size is typically the spot on the performance curve where
+#        efficiency is best before it starts to flatten out again for Jumbo and Xtra sized io.
+#
+Total io =    142 I/O Aligned to (   8) = 0 ( 0.000000000%) [-aNNN; align check off]
+#
+#Total  IO     =      142
+#Total  KBytes =     1154
+#
+#Buckets: Await
+#   0    1    5   10   25   50  100  150  200  250  500 1000 2000 5000  10s       ; avg ms/io per IO
+#0000 0128 0006 0000 0008 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000  ; #io requests
+# 0.0 90.1  4.2  0.0  5.6  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ; percentage of requests
+# 0.0 71.8  5.0  0.0 23.2  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ;~percentage of transferred data
+#
+#Buckets: KB/IO (Request Size)
+#   0   10   50  100  250  500 1000 2000 5000  10M  25M  50M  75M 100M 200M       ; kb xferred per IO
+#0023 0105 0008 0006 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000  ; #IO requests
+#16.2 73.9  5.6  4.2  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ; percentage of requests
+# 0.0 42.5 19.1 38.5  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ;~percentage of transferred data
+#
+#Buckets: KB/IO (Read Request Size)
+#   0    1    2    4    8   16   32   48   64   96  128  256  512 1024 2048       ; kb  xferred per read io request
+#0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000 0000  ; #requests
+# 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ; percentage of requests          :       0.00
+# 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ;~percentage of transferred data  :       0.00
+# 0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  0.0  ;~percentage of time              :       0.00
+#
+#Buckets: KB/IO (Write Request Size)
+#   0    1    2    4    8   16   32   48   64   96  128  256  512 1024 2048       ; kb  xferred per write io request
+#0023 0000 0000 0087 0018 0004 0001 0003 0001 0005 0000 0000 0000 0000 0000 0000  ; #requests
+#16.2  0.0  0.0 61.3 12.7  2.8  0.7  2.1  0.7  3.5  0.0  0.0  0.0  0.0  0.0  0.0  ; percentage of requests          :     100.00
+# 0.0  0.0  0.0 30.2 12.3  4.5  2.4 12.1  4.9 33.6  0.0  0.0  0.0  0.0  0.0  0.0  ;~percentage of transferred data  :     100.00
+#17.5  0.0  0.0 16.1 36.3  0.1  0.6  0.1  0.1 29.2  0.0  0.0  0.0  0.0  0.0  0.0  ;~percentage of time              :     100.00
+
+------------------------------------------------------------------------------------------------------------------------------------------
+--- Hot LBA Map   ------------------------------------------------------------------------------------------------------------------------
+--- Device: nvme0n1         --------------------------------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------------------------------------------------------------
+Bucket size=128KiB * 1024 multiplier = 131072KiB (each bucket spans 262144 sectors)
+IO Count Threshold=1 (this or more read+write total io count and the bucket is output, otherwise its added the the 'skipped' bucket.
+%IO    - percentage of total number of io         (     142          ) in this bucket
+%Xfer  - percentage of total sectors read/written (      2308 sectors) in this bucket
+%Await - percentage of total await   time (Q2C)   (     208.24ms     ) in this bucket {await as in iostat's await column }
+%D2C   - percentage of total storage time (D2C)   (     207.59ms     ) in this bucket {storage time as in storage latency}
+Notes   - 1. %Await can be smaller hanger than %D2C in the following because these are percentages of total io load.
+             When %Await < %D2C, this just means that on average the io in this bucket had more storage latency than other buckets.
+             In ideal world the %Await would track %D2C +/- some small amount, which for the most part should be true.
+------------------------------------------------------------------------------------------------------------------------------------------
+               |_________Bucket__________| |___Seeks___| |_______________Reads__________________| |________________Writes_________________| |___Percentage of Total___|
+  Bucket#      bgn sector       end sector     in    out     count  sectors  await(ms)    d2c(ms)      count  sectors  await(ms)    d2c(ms)    %IO  %Xfer %Await   %D2C
+       0                0-          262143      1:     1         0,       0,      0.00,      0.00         1,       0,     23.64,     23.63    0.70   0.00  11.35  11.38
+     256         67108864-        67371007      1:     1         0,       0,      0.00,      0.00         1,       0,      0.13,      0.12    0.70   0.00   0.06   0.06
+     320         83886080-        84148223      1:     1         0,       0,      0.00,      0.00         1,      12,      1.13,      1.11    0.70   0.52   0.54   0.54
+     640        167772160-       168034303      1:     1         0,       0,      0.00,      0.00         1,       0,      1.07,      1.06    0.70   0.00   0.51   0.51
+    2195        575406080-       575668223     20:    20         0,       0,      0.00,      0.00        20,       0,     11.66,     11.49   14.08   0.00   5.60   5.53
+    2259        592183296-       592445439     40:    39         0,       0,      0.00,      0.00        80,    1440,     10.20,      9.94   56.34  62.39   4.90   4.79
+    2600        681574400-       681836543      6:     6         0,       0,      0.00,      0.00         6,      48,      0.20,      0.18    4.23   2.08   0.09   0.09
+    2605        682885120-       683147263      1:     1         0,       0,      0.00,      0.00         1,       8,      0.10,      0.10    0.70   0.35   0.05   0.05
+    2606        683147264-       683409407      8:     8         0,       0,      0.00,      0.00        13,     104,      0.41,      0.39    9.15   4.51   0.20   0.19
+    2614        685244416-       685506559      1:     1         0,       0,      0.00,      0.00         1,     160,     23.58,     23.57    0.70   6.93  11.32  11.35
+    2615        685506560-       685768703      2:     2         0,       0,      0.00,      0.00         2,     320,     37.12,     37.11    1.41  13.86  17.83  17.88
+    2898        759693312-       759955455      3:     3         0,       0,      0.00,      0.00         3,      80,      2.34,      2.31    2.11   3.47   1.12   1.11
+    2899        759955456-       760217599      1:     1         0,       0,      0.00,      0.00         1,       8,      0.07,      0.06    0.70   0.35   0.03   0.03
+    2911        763101184-       763363327      9:    10         0,       0,      0.00,      0.00        10,     120,     73.15,     73.06    7.04   5.20  35.13  35.19
+    2913        763625472-       763887615      1:     1         0,       0,      0.00,      0.00         1,       8,     23.46,     23.46    0.70   0.35  11.27  11.30
+  Active               15/              15     96:    96         0,       0,      0.00,      0.00       142,    2308,    208.24,    207.59  100.00 100.00 100.00 100.00
+ %I[03700]-1364 events processed, 0 exceptions noted (0 plug flow, 0 badfmt), 23 events discarded
+ %I[03702]-Success. EOF reached.
