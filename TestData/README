@@ -1,0 +1,4 @@
+
+Each set of test data should be contained either within its own .tar archive file,
+or its own separate directory.  A 'README' file with each test data set should also
+be present to describe the test data and why its present.

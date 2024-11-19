@@ -1,0 +1,29 @@
+
+This is a short test file used for debugging implicit write io barriers (IMBs) which have some 
+unusual matching requirements.
+    + length is explicit and implicit zero in A and final C events
+    + the full iotype is present in A,Q,G but not in the final C event... the leading 'F'lush
+      io attribute is missing (and must be removed from the original FWFS for matching of the
+      final 'C'omplete event).
+    + there is no 'I'nsert event present in these IMBs
+    + the D and 1st C event always use Flush/None as its iotype
+    + the 1st C event also includes a sector number of 0 and will not match the original
+      sector number in the first A|Q event that is present.  However, this sector number
+      of zero *could* be the same as the sector in the initial A|Q that started this io
+      context if its sector number was zero.  So there is a compound rule of C+FN+0 to
+      differentiate it from the 2nd C+WFS+<sector> where <sector> may be zero in that last
+      complete event.
+
+259,0   11        1     0.024124329  1889  A FWFS 575480360 + 0 <- (253,3) 407706152
+259,0   11        2     0.024124474  1889  Q FWFS [jbd2/dm-4-8]
+259,0   11        3     0.024126502  1889  G FWFS [jbd2/dm-4-8]
+259,0   11        4     0.024133625   612  D  FN [kworker/11:1H]
+259,0   11        5     0.024899010     0  C  FN 0 [0]
+259,0   11        6     0.024903271     0  C WFS 575480360 [0]
+
+
+This test file is also referenced in Issue "Flushing of prior io context at 1 second (relative) 
+boundaries is not working correctly in some cases" and should be used to debug and fix that bug.
+
+
+
