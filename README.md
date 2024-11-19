@@ -44,5 +44,7 @@ In the above case, the total <code>iostat</code> await time is the Q2C time peri
 
 In most cases the D2C storage related time dominates the total Q2C time -- in this case 23.549ms is storage and 0.009ms is kernel based time.  The D2C time is a block of time that cannot be further subdivided and covers a fixed code path amount of time in the driver, the host (storage) bus adapter's (HBA) firmware and hardware time to pass the io request out to the transport, the transport time (for fibre channel this includes switch time), the target or storage controller at the far end of the storage bus transport, the physical storage time, and the returned status and data path back to through the HBA to the kernel's io done routine.
 
+The *blktrace_merge* program creates a number of different output file beyond the main devicename.blktrace.merged.txt output.
+
 
 
