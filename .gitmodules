@@ -1,0 +1,9 @@
+[submodule "Notes"]
+	path = Notes
+	url = git@github.com:OxDeadmeat/blktrace_merge.git
+[submodule "Examples"]
+	path = Examples
+	url = git@github.com:OxDeadmeat/blktrace_merge.git
+[submodule "Internals"]
+	path = Internals
+	url = git@github.com:OxDeadmeat/blktrace_merge.git
