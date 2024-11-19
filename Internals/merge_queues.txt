@@ -1,0 +1,36 @@
+
+
+There are four merged io context queues within blktrace_merge:
+    + staged   (A|Q   -> create on staged)
+    + main     (S|G|I -> move to main    )
+    + complete (C     -> move to complete)
+    + done     (output-> move to done    )
+
+Staged Queue
+Events A|Q (remAp | Queue): The first instance of A|Q creates a new io context.  This could be just temporary as the event
+stream could be a M|F merge event.  In the case of encountering a M|F event later on will result of the temporary io context
+on the staged queue being absorbed into a exising io context on the main queue.
+
+Note that wil the main queue is hashed and the completion queue if FIFO in nature and needs no acceleration, the staged queue
+is not hashed by design.  It is expected that io will be short lived on the staged queue.  An A|Q creates a merged io context
+there, but just about any other matching event will result in the context being moved off the staged queue (and onto the main
+queue or merged into an existing io context).  This design decision results in the program running slower and slower in those
+cases where the stage queue accumulates a lot of io context due to bugs or other failures of the program to properly understand
+and match events to existing merged io contexts.
+
+Main Queue
+Events G|S|I (Get-request | Sleep | Insert ): Any of these types of events will promote a staged io context to the main queue.
+
+Completion Queue
+Event C (Complete): A complete event will move an io context from the main queue to the completion queue.  However, since each
+io context can have multiple completion events, an io context moved to the completion queue does not necessarily result in output
+immediately.  Until output is generated, the completed io are queued up in FIFO manner.  Once output is generated from a completed
+io context, the io is moved to the done queue.
+
+Done Queue
+Currently io contexts are maintained on the done queue in FIFO manner.  These are held over so that events that don't match existing
+io may be tried for matching purposes against done io.  This really is only appropriate for further 'C'ompletion events.
+
+
+
+

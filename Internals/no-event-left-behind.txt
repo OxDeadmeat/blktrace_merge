@@ -1,0 +1,16 @@
+
+The goal of the processing of the event stream is to account for every event within the output of blkparse.  
+
+However, there are two areas where this is no possible:
+    + near the beginning of the file where events are for io that was already in process -- where the
+      file does not include the events that started the io.  These events happened before data collection
+      started.
+    + near the end of the file where events for io happen after the data collection stops.
+
+In cases where an event cannot be processed, it is output/flagged as an exception.  This is different from 
+a ghost io.  Ghost IOs are created when there is enough of a fragmented event stream from the beginning of the
+file but not the actual origin being present.  As a minimum a D,C must be present.  It its just a C event then
+no ghost is created, just and exception.  Ghost events do not participate in the larger per second statistics
+tracking.
+
+

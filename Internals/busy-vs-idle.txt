@@ -1,0 +1,32 @@
+In iostat there is a %util column.  This really just reflects busy percentage within a sample -- that is the amount of time
+within an interval that at least 1 io was present in the A...C event spread.
+
+Within blktrace_merge it does not track %util (%busy) but instead tracks the simplier %idle time.  When the number of io
+in progress goes to zero, the timestamp of that C event is captured as start of idle.  When the in progress io count goes
+from 0->1, the dTime of end_idle - start_idle is captured and added to the sample interval's idle time.  When the sample
+interval crosses a (relative) 1 second boundary and there are no io in progress, then the end_idle is set to the end of
+the io 1 second boundary.
+
+This often happens when io stops for a period of time such that the next A|Q event appears with a timestamp associated 
+the the next or later 1 second (relative) interval.  Thus idle time is sliced in two: one part of the previous time 
+sample being left, and the remainder accumulating to the new time interval.
+
+This does create issues if or when the event processing logic cannot properly match io events into existing io contexts
+such that it leaves dangling "in-process" io within the main queue that really has completed (but the code failed to 
+match the C to the io context(s) within main queue.  One known (and fixed) issues where this happens is with hidden
+merges: hidden merges happen when a 'M'erge event fills a hole between two existing io on the main queue.  What is 
+seen is a Dispatch event with a known/matching starting sector but a much larger than expected length.  Code was added
+to try and match across two existing io contexts at Dispatch time to detect and process this type of hidden merging.
+
+A similar, and more prevalent, issue happens with the staged queue.  IO contexts that missing S,G,I (or D) events end
+up leaving io contexts dangling on the staged queue resulting in the device never going to idle state as it should.  A
+recent occurance of this was related to io barriers (that no longer use the 'B'arrier io type).  The event stream for
+these implicit Write IO Barriers have a sector plus zero length.  However, their Q,G,D events contain neither sector
+nor length information which resulted in them being tagged as exceptions (code could not find a valid match to an
+existing io context as expected).  This resulted in a fair number of IMplicit Barrier io being accumulated within the
+stage queue and again the device never going idle.  Code has been updated to handle these types of event streams.
+
+One possible design change would be to no update the in progress count/tracker for zero length io.  But this would only
+be a crutch and imply that it is expected that additional bugs/errors within the code exist such that similar IMBs will
+not be processed correctly.  It is better to assume the code will correctly handle merging of such event streams rather
+than expect that they will not be handled correctly.

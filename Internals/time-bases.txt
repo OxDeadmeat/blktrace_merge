@@ -1,0 +1,16 @@
+
+When blktrace is invoked, the data collection starts at a relative timestamp base of 0.0000 seconds.  This can make comparing or cross-verification
+using iostat output difficult (but not impossible).  The time bases between iostat and blktrace are not sync'd in any way.
+
+Even matching the iostat output, in a general way, against blktrace can be difficult.  One way to avoid this or at least provide a means to sync
+which iostat samples are roughly matched to blktrace data is to create a periodic known io load to the same device under test or a different one,
+but then include that device in the blktrace device set.  For example, creating a read/sync/fua of a specific sector and specific size will clearly
+show up in iostat and blktrace data allowing a rough time matching between the two independent io monitoring data sources.
+
+To provide a better match we need to know exactly the timebase of the iostat output and blktrace event streams.  This can only be accomplished
+by a slight modification of iostat to try and alwasy start its sample time as near to the start of a 1 second boundary as possible.  And then
+to replicate that within the read io injection (to also insert an read io as near the start of a 1 second wall-clock boundary).  If that is done
+then a final tweak is needed to the blktrace_merge to add a timebase offset adjustment to the nanosecond.  Adding that would result in the 
+blktrace merge output showing wall clock time vs just the relative 0 based blktrace data collection start timebase.
+
+Trying to align iostat and blktrace data helps bolster iostat as a valid reflection of storage issues as shown in D2C times within blktrace.

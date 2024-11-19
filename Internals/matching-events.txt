@@ -1,0 +1,24 @@
+
+To match events, 99% of the time its a simple io-type plus sector and length.  Merging just creates new sector,length information.
+However, there are a large number of different exceptions for the remaining 1% of cases.
+
+For example, IBMs include zero length sector on the first event (A or Q but not A,Q) but no sector on subsequent events.  And the 
+io type changes, dropping the leading 'F' (Flush) and even subbing FN (Flush/None) for the io type in certain cases.  Hidden merges
+can cause the sector,length to change unexpectedly at D event time.  There are additional cases where merging, while matching the 
+major/primary io type (Read,Write,Discard...) it doesn't match the other qualifiers.  For example a WS may end up merged with just 
+a W w/o sync ... so for merge matching the code first must try and exact iotype,sector,length match and then if no context match
+found retry with a series of "fuzzy" matches as clearly the 'M'erge event indicates a merge happened... the code just needs to 
+figure out to which existing context.
+
+The other issue events present.  An existing io context of A,Q,G,I,D should only be expecting a C event and none of the others
+(unless a Requeue happens).  So once the iotype,sector,length matching happens than another check is needed that performs an
+event allowed check.  This is especially useful when duplicate, simultaneous io happens to the same sector,length.  The matching
+ensures that the separate io events only get one set of appropriate events.
+
+In kernels where there are multiple completion events tied to the individual BIO in a merged REQUEST, the matching on sector,length
+will fail and a 2nd look to see if the sector,length is wholly contained within a context and a merge event is associated with the
+specific sector,length is present underneath the io context.  If so, that BIO is marked complete such that another complete for the
+same BIO is not associated with the context (it could be for a different overlapping or dupliate request that is also live at the 
+same time).
+
+

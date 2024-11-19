@@ -1,0 +1,29 @@
+
+Cloned BIOs can happen in several different ways.  The one that caused issues was for dmcrypt whereby the original io on the cypto device
+was completed and that completion was used in tracking disk stats within the kernel.  The result was that iostat could show io rates of 10-20GB/s
+at the device level, but then the avg queue size remained high and bleeding towards zero with no completing io.  If any other background io
+was performed, such as a periodic meta read, then that io completed and was charged in iostat with ALL of the accumulated io time associated
+with 1000s of queued and completing io (the ones in avg queue but show up as zero in completed io).  They didn't show up in the stats for
+completed io because completed io stats were updated at BIO clone time, not at actual io completion which happened much later on.
+
+#Time    Device            r/s      w/s     rkB/s      wkB/s   rrqm/s   wrqm/s  %rrqm  %wrqm r_await     w_await  aqu-sz rareq-sz wareq-sz   svctm  %util
+14:19:00 dm-3            16.00     6.00    136.00      24.00     0.00     0.00   0.00   0.00    0.50        0.00    0.01     8.50     4.00    0.50   1.10
+14:19:01 dm-3            12.00  6809.00    132.00  230796.00     0.00     0.00   0.00   0.00   10.42      112.08   763.29   11.00    33.90    0.08  55.50
+14:19:02 dm-3            14.00 24374.00    108.00 1409108.00     0.00     0.00   0.00   0.00    8.07      231.11  5633.11    7.71    57.81    0.04 100.00
+14:19:03 dm-3             9.00     0.00    124.00       0.00     0.00     0.00   0.00   0.00    0.00        0.00  9649.92   13.78     0.00  110.67  99.60
+14:19:04 dm-3             0.00     0.00      0.00       0.00     0.00     0.00   0.00   0.00    0.00        0.00   835.07    0.00     0.00    0.00  99.80
+14:19:05 dm-3             1.00     0.00      4.00       0.00     0.00     0.00   0.00   0.00    0.00        0.00   763.50    4.00     0.00  989.00  98.90
+14:19:06 dm-3            13.00    88.00    156.00     980.00     0.00     0.00   0.00   0.00 2878.69   275032.31 24240.27   12.00    11.14   10.01 101.10
+14:19:07 dm-3            18.00     1.00     76.00       4.00     0.00     0.00   0.00   0.00    9.56 14163340.00 14163.51    4.22     4.00   51.37  97.60
+
+Note at that last sample time, the single write io reports an io await time of 14,163 seconds (3.93 hours).  A large amount of write completion
+time has been accumulated by the 10,000 io that completed between 19:06 and 19:07 as detailed by the aqu-sz size dropping from 24,000 to 14,000...
+and yet although at least 10,000 io completed between those two time periods, only 19 io are showing in the completed io count.
+
+On the blktrace side of things, we see the dm-3 io completing immediately, but the cloned io at the next device level where storage actually
+resides, has completion times much larger due to stacked io waiting for lun queue depth space, etc.  
+
+These types of event reconciliation between blktrace and iostat can prove interesting to untangle.
+
+This particular problem was solved for dm-crypt but later a similar issue popped up for cloned io across software raid mirrors.
+
