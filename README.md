@@ -1,7 +1,8 @@
 # blktrace_merge
 
+<code>blktrace_merge</code> takes as input a &lt;devicename>.blktrace.txt event stream file from the utility blkparse and attempts to merge the individual events into a single io context. It performs the tedious math between the initial io showing up within the event stream (A|Q events) and other key events like 'D'ispatch to driver and 'C'ompletion of the io.  It outputs those values in a single line for the set of merged events associated with a single io.</br>
 
-<code>blktrace_merge</code> takes as input a &lt;devicename>.blktrace.txt event stream file from the utility blkparse and attempts to merge the individual events into a single io context.
+*note: this program was previously named blktrace_parse, which was a bit of a misnomer as it didn't actually parse anything, but rather merges related individual blktrace events together.**
 
 <code>
 FILE: nvme0n1.blktrace.txt
@@ -24,7 +25,7 @@ FILE: nvme0n1.blktrace.txt
 The above events associated with a single io are merged into a single io context and upon 'C'ompletion of the io, the Q2I, Q2D, D2C and Q2C information is output for this 1 io.
 
 <code>
-$ ../blktrace_merge nvme0n1.blktrace.txt
+$ ./blktrace_merge nvme0n1.blktrace.txt
 
 FILE: nvme0n1.blktrace.merged.txt
 
