@@ -1,0 +1,415 @@
+#!/bin/bash
+#
+# FILE: blktrace_merge.bsh
+#
+#*
+#*----------------------------------------------------------------------------------------
+#*
+#* All software provided below is unsupported and provided as-is, without warranty 
+#* of any kind.
+#*
+#* To the extent possible under law, Red Hat, Inc. has dedicated all copyright
+#* to this software to the public domain worldwide, pursuant to the CC0 Public
+#* Domain Dedication. This software is distributed without any warranty.
+#* See <http://creativecommons.org/publicdomain/zero/1.0/>.
+#*
+#*----------------------------------------------------------------------------------------
+#*
+#* Maintainer: blackhole.401693@gmail.com
+#* Version   : "02.34-0123-23022024"		/* Fri Feb 23 11:52:40 2024 bubrown */
+#*
+#*----------------------------------------------------------------------------------------
+#
+#
+# History:
+# 11/14/2024 + chg: remove all references to _useold and blktrace_parse -- this older name
+#                   for the program is now fully deprecated.
+# 02/20/2024 + tmp: temp|workaround for discard event stream having no merges where they
+#                   are expected and needed.  Added temp -D flag to hide the issue otherwise
+#                   blktrace_merge will take forever to run. {REMOVED}
+# 11/14/2023 + rfe: reduce the chatter of logging output by adding -qqua flags, quiet x 2,
+#                   plus reduce noisy output about plug state flow within the event stream,
+#                   and turn off the annotation file which is mostly for debug anyway.
+# 01/11/2021 + chg: large number of cpus present dilute the output during blkrawverify,
+#                   change how the verify is done to reduce the extraneous noise (like the
+#                   list of CPUs as verify works through the list of files)
+# 08/19/2020 + chg: change over to blktrace_merge (new) vs blktrace_parse (old) -- both
+#                   programs exist within the new 'kit', but default is to use new version
+#                   but you can force use of older version of the program by setting _useold=1
+# 08/19/2020 + rfe: verify that the sdN.blktrace.parse.out file was created without issue
+#                   via: 1) file is > 0 length, 2) no core.* present, 3) other?  With the
+#                   overlapping io checker present in parse it was bombing out.
+# 08/07/2020 + chg: move checks for blktrace_parse to front, but just warn if its missing.
+#                   all blktrace package utils to be applied and then stop.  Also add check
+#                   that blkparse, blkrawverify, and btt from blktrace package are present
+#                   and if not, then quit.
+# 08/07/2020 + bug: sometimes the blktrace_capture program isn't located in cwd and also not
+#                   in path.  Added which blktrace_parse to verify that this script can find
+#                   and use blktrace_parse -- it also checks for aliases.  
+#			old order: 1. /usr/local/bin/blktrace_parse    <= default 
+#                                  2. ./blktrace_parse                 <= local copy
+#                       new order: 1. ./blktrace_parse                 <= local copy/default
+#				   2. ./blktrace_parse.dbg 
+#                                  3. alias check ;  alias | grep " blktrace_parse="
+#                                  4. which check ;  which blktrace_parse | wc -l 
+#                                     ... if = 1 then use, 
+#                                         if > 1 use first but additional warning
+#                                         if = 0 then error, no parse program, exit.
+#                                  5. /usr/local/bin/blktrace_parse
+#	            The new order checks and uses personal preference, local dir, your aliases
+#                   if set, your search paths, and then the final system default of /usr/local/bin.
+#                   Folks have control over 1-4 but not the final location check.
+# 08/07/2020 + rfe: new blktrace_capture.bsh won't be affected by this issue, but prior 
+#                   older versions assumed that the user specified "testname" ($1) was
+#                   unique per run.  However, customers often just reused the same testname
+#                   over and over.  This created nested test runs.  Run n+1 would capture all
+#		    of its output plus the previous run(n).  The previous run would capture all
+#                   its output and run (n-1), and so forth.  There may be a couple invocations
+#                   of the capture script in the same directory with the same name, but on different
+#                   sets of disks.  All that was problematic in terms of each run successfully 
+#                   capturing its data vs some things like iostat being grabbed and deleted underneath
+#                   one capture stream vs another.  This should not happen with the latest blktrace_capture.bsh.
+#                   Meanwhile, some steps have been added to this script to deal with captures that
+#                   do have this problem.  This includes nested unpacking of traces into created
+#                   subdirectories and runN-1, runN-2, etc. And checking/validation of files in each
+#                   run (main/cwd) and each previous run subdir.  This checking is only that all the
+#                   expected files are present, and if not can it find a substitute from a previous
+#                   run?  And while this nesting of captures should no longer happen if new capture script
+#                   is used, the validation of parts being present is still a valid thing to do going
+#                   forward.  This is all easiest if performed within a C program, gets really wordy
+#                   extracting out timestamps from names etc, and thought of building a new program for
+#                   same... but then have to bring along two programs and script -- so I've added the
+#                   verification to the current blktrace_parse program and it gets uniquely invoked to
+#                   perform said verification as a separate phase wholly different from a parsing 
+#                   invocation.
+# 08/07/2020 + rfe: added call to blkrawverify earlier.  This is part of blktrace package.
+#                   man page is a bit skimpy, but verifies raw per cpu data files before
+#                   the script merges them into a single binary.  Was getting some weird
+#                   text output from blkparse (standard blktrace package parse program).
+#                   That then triggered issues in blktrace_parse (custom "glue together events
+#                   from blktrace into one event").  Found that running blkrawverify detected
+#                   a number of issues.  Moving to a later major version kernel "fixed" most
+#                   of the complaints (was running either 7 or 8 capture and parsing on RHEL 6).
+#                   So, added this callout, which can take some time and also builds a large
+#                   output file potentially, to give some feedback on whether blktrace package
+#                   detects any issue at the binary event level.  Typical runs are clean, but
+#                   some can show a small number (percent wise) of events it flags as "bad".
+#                   See the verify output file for particulars.  Send maintainer blktrace files
+#                   in question if there are large numbers of flagged "bad" events and try running
+#                   blktrace package on later kernel to see if that helps.  Mostly interested
+#                   in what having a lot of bad flagged events within blkrawverify means to the 
+#                   created blkparse output file... and whether that trips up or otherwise affects
+#                   blktrace_parse into doing something bad.
+# 08/07/2020 + org: adding history section.  why didn't I earlier???
+#
+#
+# Check: find out if a copy of blktrace_merge is available
+#
+# Locate a version of blktrace_merge to utilize, report if its missing only.
+# Do this upfront so that we can complain in 'main' just the once for all 
+# devices present.  Each recurse will have to do this again... but so be it.
+#
+# Search for blktrace_merge, it might not be present in this environment.
+# ---Bgn: search for blktrace_merge program --------------------------------------
+_cmdname="blktrace_merge"
+_cmdfile="merged"
+_cmdparse=""
+_cmdversion1=""
+_cmdversion2=""
+_cmdversion3=""
+_cmdversion4=""
+_cmdversion5=""
+if [ -e blktrace_merge                ] ; then _cmdversion1="  $( ./blktrace_merge     -V 2>/dev/null | grep version) :: ./blktrace_merge"     ; fi
+if [ -e blktrace_merge.dbg            ] ; then _cmdversion2="  $( ./blktrace_merge.dbg -V 2>/dev/null | grep version) :: ./blktrace_merge.dbg" ; fi
+if [ $( alias | grep "blktrace_merge=" | wc -l ) -ne 0 ]
+then
+    _cmdtmp=$(alias | grep "blktrace_merge=" | tail -1 )
+    _cmdversion3="  $( $_cmdtmp         -V 2>/dev/null | grep version) :: $_cmdtmp (alias)"
+fi
+if [ $( which blktrace_merge  2>/dev/null |& grep -v "which: no blktrace_merge" | wc -l) -ne 0 ]
+then
+    _cmdtmp=$(which blktrace_merge 2>/dev/null |& grep -v "which: no blktrace_merge" | head -1 )
+    _cmdversion4="  $( $_cmdtmp         -V 2>/dev/null | grep version) :: $_cmdtmp (which)"
+fi
+if [ -e /usr/local/bin/blktrace_merge ]
+then
+    _cmdtmp="/usr/local/bin/blktrace_merge"
+    _cmdversion5="  $( $_cmdtmp         -V 2>/dev/null | grep version) :: /usr/local/bin/blktrace_merge (direct)"
+fi
+#
+#
+if [ -e blktrace_merge                ]
+then
+    _cmdparse="./blktrace_merge"
+    _cmdversion1=">>$( $_cmdparse -V 2>/dev/null | grep version) :: $_cmdparse"
+elif [ -e blktrace_merge.dbg            ]
+then
+    _cmdparse="./blktrace_merge.dbg"
+     _cmdversion2=">>$( $_cmdparse -V 2>/dev/null | grep version) :: $_cmdparse"
+elif [ $( alias | grep "blktrace_merge=" | wc -l ) -ne 0 ]
+then
+    _cmdparse=$(alias | grep "blktrace_merge=" | tail -1) ;
+    _cmdversion3=">>$( $_cmdparse -V 2>/dev/null | grep version) :: $_cmdparse (alias)"
+elif [ $( which blktrace_merge  2>/dev/null |& grep -v "which: no blktrace_merge" | wc -l) -ne 0 ]
+then
+    _cmdparse=$(which blktrace_merge 2>/dev/null |& grep -v "which: no blktrace_merge" | head -1 )
+    _cmdversion4=">>$( $_cmdparse -V 2>/dev/null | grep version) :: $_cmdparse (which)"
+elif [ -e /usr/local/bin/blktrace_merge ] ;
+then
+     _cmdparse="/usr/local/bin/blktrace_merge"
+    _cmdversion5=">>$( $_cmdparse -V 2>/dev/null | grep version) :: $_cmdparse (direct)"
+fi
+# ---End: search for blktrace_merge program --------------------------------------
+#
+# If a copy of blktrace_merge not found, exit.
+if [ "$_cmdparse" == "" ] 
+then
+    if [ "$1" == "" ] ; then echo "blktrace_merge program not found, exit." ; fi
+    exit
+fi
+#
+#
+# ---MAIN------------------------------------------------------------------------------
+#
+if [ "$1" == "" ] || [ "$1" == "logon" ]
+then
+    # MAIN:
+    #       - output command being used
+    #       - and its version
+    #       - list the available devices to be processed (<dev>.blktrace.0)
+    #       - then for each device recurse call this script to process one device at a time
+    #       - then exit/done.
+    _blktrace_package=0
+    if [ -e $(which blkrawverify) ] ; then _blktrace_package=$(( $_blktrace_package + 1 )) ; fi
+    if [ -e $(which blkparse    ) ] ; then _blktrace_package=$(( $_blktrace_package + 1 )) ; fi
+    if [ -e $(which btt         ) ] ; then _blktrace_package=$(( $_blktrace_package + 1 )) ; fi
+    #
+    _cmdpause=1
+    echo " "
+    echo -n "command: "$0
+    grep Version $0 | grep -v grep | awk -F" " '{print " :: Version "$4}'
+    if [ $_blktrace_package -ne 3 ] ; then "%E-one or more of blktrace, btt, and blkrawverify are missing.  Please install blktrace package." ; exit ; fi
+    if [ "$_cmdparse" == "" ]
+    then
+       echo "%W-cannot find $_cmdname executable. Only standard blktrace package utilities will be run."
+       _cmdpause=10
+    elif [ ! -e $_cmdparse ]
+    then
+       echo "%W-missing $_cmdparse file? Only standard blktrace package utilities will be run."
+       _cmdpause=10
+       echo "$_cmdparse :: $( $_cmdparse -V 2> /dev/null | grep version)"
+       echo "---Available-----------------------------------------------------------------------"
+       if [ "$_cmdversion1" != "" ] ; then echo "          $_cmdversion1" ; fi
+       if [ "$_cmdversion2" != "" ] ; then echo "          $_cmdversion2" ; fi
+       if [ "$_cmdversion3" != "" ] ; then echo "          $_cmdversion3" ; fi
+       if [ "$_cmdversion4" != "" ] ; then echo "          $_cmdversion4" ; fi
+       if [ "$_cmdversion5" != "" ] ; then echo "          $_cmdversion5" ; fi
+       echo "-----------------------------------------------------------------------------------"
+       _cmdpause=2
+    else
+       echo "command: $_cmdparse :: $( $_cmdparse -V 2> /dev/null | grep version)"
+       _cmdpause=1
+    fi
+    echo "%I-using blktrace package  $( rpm -qa | grep blktrace | head -1 )"
+    echo " "
+    #
+    #
+    _numb_devs=$( ls -1c -v *.blktrace.0 2>/dev/null | wc -l )
+    echo "Processing the following $_numb_devs blktrace file sets: "
+    if [ $_numb_devs -eq 0 ] ; then             exit ; fi
+    if [ $_cmdpause  -ne 0 ] ; then sleep $_cmdpause ; fi
+    ls -1c -vr *.blktrace.0 | awk -F"." '{print "    . "$1}' | awk -F"_" '{print $NF}' | xargs -I {} $0 {} showsz $1 $2 $3 $4
+    sleep 2
+    ls -1c -vr *.blktrace.0 | awk -F"." '{print         $1}' | awk -F"_" '{print $NF}' | xargs -I {} $0 {} didcmd $1 $2 $3 $4
+    exit
+fi
+#
+# ---SUBLOOP------------------------------------------------------------------------------
+#
+# Recursed to process the set of files per device comes down here
+#
+#
+if [ "$2" == "showsz" ]
+then
+    echo -n "$1   - " ; du -shc $1.blktrace.[0-9]* | tail -1
+    exit
+fi
+if [ "$2" != "didcmd" ]
+then
+    echo -n "command: "$0
+    grep Version $0 | awk -F" " '{print " : Version "$4}'
+fi
+#
+# -qq
+# Turn off/discard logging out of the parser by default ... its a LOT of information
+# that is only needed for debugging the parser program.  That is not normally needed.
+# The log file can be in the 10-20GB range on some trace files.
+#
+# -u
+# Turn off plug/unplug event flow exceptions, can be noisy
+#
+# -a
+# Turn off annotation file, its 10x or more larger than input and who needs the extra
+# write io and filespace consumption except for debugging.
+#
+_logflag="-qqua"
+_logfile=$.blktrace._merge_.log
+if [ "$2" == "logon" ] || [ "$3" == "logon" ]
+then
+    echo " "
+    echo "-----------------------------------------------------------------------------------------------"
+    echo "Turning on informational/warning class events to the debug log ($1.blktrace_merge.log)"
+    echo "-----------------------------------------------------------------------------------------------"
+    echo " "
+    _logflag=""
+    _logfile=$1.blktrace.log
+fi
+#
+echo "==== BGN =========================================================================================="
+echo " + Processing blktrace file set for device $1... (blktrace package utilities)"
+if [ -e $1.verify.out ]
+then
+    echo "   - $(date +%H:%M:%S) verify  :: blkrawverify $1 trace files... Skipped $1.verify.out already exists"
+else
+    echo "   - $(date +%H:%M:%S) verify  :: blkrawverify $1 trace files..."
+    _ncpu=$( ls -1c $1.blktrace.[0-9]* | wc -l)
+    echo "verify $_ncpu $1.blktrace.<cpu> files..."
+    blkrawverify $1 | grep -v CPU
+fi
+if [ -e $1.verify.out ]
+then
+   if [ $( grep invalid $1.verify.out  | egrep -v " 0 invalid \(100.0%\)| 0 invalid \(  0.0%\)" | wc -l ) -ne 0 ]
+   then
+	echo "%FAILED: blkrawverify integrity checks failed.  Check $1.verify.out file."
+        echo "=========================================================================="
+        grep invalid $1.verify.out
+        echo "=========================================================================="
+        sleep 20
+   else
+        echo "=========================================================================="
+        if [ $(grep invalid $1.verify.out  | egrep -v "0 invalid \(  0.0%\)| 0 invalid \(100.0%\)" | wc -l) -ne 0 ]
+	then
+            grep invalid $1.verify.out  | egrep -v "0 invalid \(  0.0%\)| 0 invalid \(100.0%\)"
+	else
+	    echo "no errors detected."
+	fi
+        echo "=========================================================================="
+	sleep 2
+   fi
+else
+    echo "blkrawverify failed?  No $1.verify.out file found."
+fi
+echo "   - $(date +%H:%M:%S) blkparse:: combine $1 trace files into 1 binary file..."
+blkparse -i $1.blktrace. -d $1.blktrace-all.bin -M -O   &> $1.blktrace-all.log
+_sbyt=-1
+if [ -e $1.blktrace-all.bin ] 
+then 
+    _sbyt=$( stat -c %s $1.blktrace-all.bin )
+    _shsz=$(( $_sbyt / 1000000000 ))
+    _SHSZ="${_shsz}GB"
+    if [ $_shsz -eq 0 ] 
+    then 
+	_shsz=$(( $_sbyt / 1000000 ))
+	_SHSZ="${_shsz}MB"
+	if [ $_shsz -eq 0 ]
+	then
+	    _shsz=$(( $_sbyt / 1000 )) 
+	    _SHSZ="${_shsz}KB"
+	    if [ $_shsz -eq 0 ]
+	    then
+	        _SHSZ="${_sbyt}Bytes"
+	    fi
+	fi
+    fi
+fi
+echo "      . created $1.blktrace-all.bin $_SHSZ"
+echo "   - $(date +%H:%M:%S) blkparse:: convert $1 binary trace to text..."
+echo       "#Maj,Mn CPU   SeqNo     Seconds     PID  Evt Typ Sector   +Len Description"                            > $1.blktrace.txt
+echo       "#------ --- ------- --------------- -----|--|---|---------+--- -------------------------------------" >> $1.blktrace.txt
+blkparse -i $1.blktrace. >> $1.blktrace.txt
+echo "   - $(date +%H:%M:%S) btt     :: create summary via btt..." 
+btt      -i $1.blktrace-all.bin -A -I $1.blktrace.btt.iostat.txt -l $1.blktrace.btt.latency.txt -m $1.blktrace.btt.seekspersec.txt -q $1.blktrace.btt.Q2C.txt -Q $1.blktrace.btt.qdepth.txt -s $1.blktrace.btt.seeks.txt -z $1.blktrace.btt.Q2D.txt > $1.blktrace.btt.txt
+#
+# NOTE!: btt will not always generate all requested output files, depending on the available input.
+#
+if [ -e $1.blktrace.btt.qdepth.txt_*.dat          ] ; then mv $1.blktrace.btt.qdepth.txt_*.dat          $1.blktrace.btt.qdepth.txt          ; fi
+if [ -e $1.blktrace.btt.seekspersec.txt_*_d2d.dat ] ; then mv $1.blktrace.btt.seekspersec.txt_*_d2d.dat $1.blktrace.btt.D2D-seekspersec.txt ; fi
+if [ -e $1.blktrace.btt.seekspersec.txt_*_q2q.dat ] ; then mv $1.blktrace.btt.seekspersec.txt_*_q2q.dat $1.blktrace.btt.Q2Q-seekspersec.txt ; fi
+if [ -e $1.blktrace.btt.Q2C.txt_*_q2c.dat         ] ; then mv $1.blktrace.btt.Q2C.txt_*_q2c.dat         $1.blktrace.btt.Q2C.txt             ; fi
+if [ -e $1.blktrace.btt.Q2D.txt_*_q2d.dat         ] ; then mv $1.blktrace.btt.Q2D.txt_*_q2d.dat         $1.blktrace.btt.Q2D.txt             ; fi
+if [ -e $1.blktrace.btt.latency.txt*_d2c.dat      ] ; then mv $1.blktrace.btt.latency.txt*_d2c.dat      $1.blktrace.btt.D2C-latency.txt     ; fi
+if [ -e $1.blktrace.btt.seeks.txt_*_d2d_r.dat     ] ; then mv $1.blktrace.btt.seeks.txt_*_d2d_r.dat     $1.blktrace.btt.D2D-seeks-reads.txt ; fi
+if [ -e $1.blktrace.btt.seeks.txt_*_d2d_w.dat     ] ; then mv $1.blktrace.btt.seeks.txt_*_d2d_w.dat     $1.blktrace.btt.D2D-seeks-write.txt ; fi
+if [ -e $1.blktrace.btt.seeks.txt_*_d2d_c.dat     ] ; then mv $1.blktrace.btt.seeks.txt_*_d2d_c.dat     $1.blktrace.btt.D2D-seeks.txt       ; fi
+if [ -e $1.blktrace.btt.seeks.txt_*_q2q_r.dat     ] ; then mv $1.blktrace.btt.seeks.txt_*_q2q_r.dat     $1.blktrace.btt.Q2Q-seeks-reads.txt ; fi
+if [ -e $1.blktrace.btt.seeks.txt_*_q2q_w.dat     ] ; then mv $1.blktrace.btt.seeks.txt_*_q2q_w.dat     $1.blktrace.btt.Q2Q-seeks-write.txt ; fi
+if [ -e $1.blktrace.btt.seeks.txt_*_q2q_c.dat     ] ; then mv $1.blktrace.btt.seeks.txt_*_q2q_c.dat     $1.blktrace.btt.Q2Q-seeks.txt       ; fi
+ls -1c $1.blktrace.btt* | sort | xargs -I {} echo  "      . " {}
+#
+# Locate a version of blktrace_merge to utilize
+#
+echo "   - $(date +%H:%M:%S) $_cmdname:: parse/coelesce the multiple events per io within blktrace output into one line per io..."
+echo "       ---Cmd-----------------------------------------------------------------------------"
+if [ "$_cmdversion1" != "" ] ; then echo "          $_cmdversion1" ; fi
+if [ "$_cmdversion2" != "" ] ; then echo "          $_cmdversion2" ; fi
+if [ "$_cmdversion3" != "" ] ; then echo "          $_cmdversion3" ; fi
+if [ "$_cmdversion4" != "" ] ; then echo "          $_cmdversion4" ; fi
+if [ "$_cmdversion5" != "" ] ; then echo "          $_cmdversion5" ; fi
+echo "       -----------------------------------------------------------------------------------"
+#
+#
+if [ "$_cmdparse" == "" ] 
+then
+    echo "%E-cannot find $_cmdname executable. Skipping."
+    echo "        -----------------------------------------------------------------------------------"
+elif [ ! -e $_cmdparse ]
+then
+    echo "%E-missing $_cmdparse file? Skipping..."
+    echo "        -----------------------------------------------------------------------------------"
+else
+    if [ -e gmon.out ] ; then rm -f gmon.out ; fi
+    echo "       ---Execute: blktrace_merge (no part of blktrace package)---------------------------"
+    $_cmdparse -E $1.blktrace.txt $1.blktrace.$_cmdfile.txt $_logflag        | grep -v "^#" ; sleep 5
+    $_cmdparse    $1.blktrace.txt $1.blktrace.$_cmdfile.txt $_logflag       &> $_logfile
+    echo "       -------Eng: blktrace_merge---------------------------------------------------------"
+    grep "SEC:" $1.blktrace.$_cmdfile.txt |  grep await      | head -1         > $1.blktrace.$_cmdfile.summary.V1.txt
+    grep "SEC:" $1.blktrace.$_cmdfile.txt |  grep "tot\.avg" | grep -v await  >> $1.blktrace.$_cmdfile.summary.V1.txt
+    grep "SEC:" $1.blktrace.$_cmdfile.txt | egrep "%W|%E"                     >> $1.blktrace.$_cmdfile.summary.V1.txt
+    grep "SUM:" $1.blktrace.$_cmdfile.txt |  grep ALERT                       >> $1.blktrace.$_cmdfile.summary.V1.txt
+
+    grep "SEC@" $1.blktrace.$_cmdfile.txt                                      > $1.blktrace.$_cmdfile.summary.txt
+    grep "SEC@" $1.blktrace.$_cmdfile.txt |  grep "SEC@\-\-"                  >> $1.blktrace.$_cmdfile.summary.txt
+    grep "SEC@" $1.blktrace.$_cmdfile.txt |  grep "SEC@MM"                    >> $1.blktrace.$_cmdfile.summary.txt
+    grep "SUM@" $1.blktrace.$_cmdfile.txt                                     >> $1.blktrace.$_cmdfile.summary.txt
+    grep "SEC:" $1.blktrace.$_cmdfile.txt | egrep "%W|%E"                     >> $1.blktrace.$_cmdfile.summary.txt
+    grep "SUM:" $1.blktrace.$_cmdfile.txt | egrep "%W|%E"                     >> $1.blktrace.$_cmdfile.summary.txt
+    cat         $1.blktrace.$_cmdfile.summary.txt
+    if [ "$( which blk.summary 2>/dev/null )" != "" ] ; then blk.summary ; fi
+    if [ -e gmon.out ]
+    then
+        gprof $_cmdparse > $_cmdname.gprof.log
+        rm -f gmon.out
+    fi
+    if [ -e test.blktrace.bsh ]
+    then
+	./test.blktrace.bsh $1.blktrace.txt $1.blktrace.test.out $_logflag
+    fi 
+    echo " "
+    echo "        -----------------------------------------------------------------------------------"
+fi
+echo "   - $(date +%H:%M:%S) done    :: $1 blktrace files processed."
+echo "==== END =========================================================================================="
+exit
+#
+echo "Input  files:"
+echo "     <devname>.blktrace.<cpu#>              - raw file captured by blktrace"
+echo "     <devname>.blktrace-all.bin             - merged set of cpu# files for this device"
+echo "     <devname>.blktrace-all.log             - log file from merging operation"
+echo "Output files:"
+echo "     <devname>.blktrace.txt                 - blkparse output file, shows individual flow events, R,M,I,C,Q,D,C,etc. events per line"
+echo "     <devname>.blktrace.btt.*               - btt      output files"
+echo "     <devname>.blktrace.parsed.out          - old version of below"
+echo "     <devname>.blktrace.merged.txt          - from parser C program, io by io summary results showing QIDC time breakdowns, "
+echo "                                              includes end of second boundary summary info: min,max,avg,et.al." 
+echo "     <devname>.blktrace.merged.summary.txt  - grep of avg lines from above parse.out file"
+

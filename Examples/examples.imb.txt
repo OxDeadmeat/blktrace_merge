@@ -1,0 +1,155 @@
+
+two back to back barriers, the first against 0,0 after remap, the 2nd against 67135868,0 after remap.
+but note the first barrier is completed before the 2nd barrier is pushed/appears in the event stream.
+
+259,0   11       19     5.027073014  1889  A FWFS 575480512 + 0 <- (253,3) 407706304		<< TYPE 1
+259,0   11       20     5.027074128  1889  Q FWFS [jbd2/dm-4-8]
+259,0   11       21     5.027077378  1889  G FWFS [jbd2/dm-4-8]
+259,0   11       22     5.027084885   612  D  FN [kworker/11:1H]
+259,0   11       23     5.027852186     0  C  FN 0 [0]
+259,0   11       24     5.027859859     0  C WFS 575480512 [0]
+
+
+259,0    6        1     2.128390708 1390665  A FWS 2048 + 0 <- (253,0) 0                       	<< TYPE 2
+259,0    6        2     2.128390821 1390665  Q FWS [kworker/u24:6]
+259,0    6        3     2.128394855 1390665  G FWS [kworker/u24:6]
+259,0    6        4     2.128404142   507  D  FN [kworker/6:1H]
+259,0    6        5     2.152023442     0  C  FN 0 [0]
+259,0    6        6     2.152032263     0  C  WS 2048 [0]					<- is against 'F'WS w/ leading 'F' removed
+259,0    0        1     2.152241827 1388792  A FWFSM 67137916 + 0 <- (253,0) 67135868           << TYPE 3
+259,0    0        2     2.152242126 1388792  Q FWFSM [kworker/0:0]
+259,0    0        3     2.152246022 1388792  G FWFSM [kworker/0:0]
+259,0    0        4     2.152253196   340  D  FN [kworker/0:1H]
+259,0    0        5     2.152370129     0  C  FN 0 [0]
+259,0    0        6     2.152371080     0  C WFSM 67137916 [0]					<- is against 'F'WFSM w/ leading 'F' removed
+
+
+test.1]$ grep ' C ' *blktrace.txt | grep -v " + " | grep -v FN
+259,0   11        6     0.024903271     0  C WFS 575480360 [0]   << type 1, most common.
+259,0   11       12     0.026615634     0  C WFS 575480384 [0]
+259,0   11       18     0.028146321     0  C WFS 575480408 [0]
+259,0    6        6     2.152032263     0  C  WS 2048 [0]        << type 2, less common
+259,0    0        6     2.152371080     0  C WFSM 67137916 [0]   << type 3, least common?
+259,0   11       24     5.027859859     0  C WFS 575480512 [0]
+259,0   11       30     5.029915295     0  C WFS 575480536 [0]
+259,0   11       36     5.031351649     0  C WFS 575480560 [0]
+259,0   11       42    10.007793268     0  C WFS 575480704 [0]
+259,0   11       48    10.009601874     0  C WFS 575480728 [0]
+259,0   11       54    10.010896213     0  C WFS 575480752 [0]
+259,0   10        6    15.033051548     0  C WFS 575480856 [0]
+259,0   10       12    15.035082058     0  C WFS 575480880 [0]
+259,0   11       60    15.036451780     0  C WFS 575480904 [0]
+259,0   11       66    20.012370213     0  C WFS 575481048 [0]
+259,0   11       72    20.014124992     0  C WFS 575481072 [0]
+259,0   11       78    20.015737765     0  C WFS 575481096 [0]
+259,0    2        6    20.135699076     0  C  WS 167774208 [0]
+259,0   11       84    20.136634602     0  C WFS 575481200 [0]
+259,0   11       90    23.113350329     0  C WFS 575481400 [0]
+259,0   11       96    25.014568572     0  C WFS 575481544 [0]
+259,0   11      102    25.015972938     0  C WFS 575481568 [0]
+259,0   11      108    25.017566539     0  C WFS 575481592 [0]
+
+
+$ egrep " C | A " *blktrace.txt | egrep " \+ 0|WFS|C  WS" | egrep -v "\+ [1-9]"
+259,0   11        1     0.024124329  1889  A FWFS 575480360 + 0 <- (253,3) 407706152
+259,0   11        6     0.024903271     0  C WFS 575480360 [0]
+
+259,0   11        7     0.026215611  1889  A FWFS 575480384 + 0 <- (253,3) 407706176
+259,0   11       12     0.026615634     0  C WFS 575480384 [0]
+
+259,0   11       13     0.027732775  1889  A FWFS 575480408 + 0 <- (253,3) 407706200
+259,0   11       18     0.028146321     0  C WFS 575480408 [0]
+
+259,0    6        1     2.128390708 1390665  A FWS 2048 + 0 <- (253,0) 0
+259,0    6        6     2.152032263     0  C  WS 2048 [0]
+
+259,0    0        1     2.152241827 1388792  A FWFSM 67137916 + 0 <- (253,0) 67135868
+259,0    0        6     2.152371080     0  C WFSM 67137916 [0]
+
+259,0   11       19     5.027073014  1889  A FWFS 575480512 + 0 <- (253,3) 407706304
+259,0   11       24     5.027859859     0  C WFS 575480512 [0]
+
+:
+
+259,0    2        1    20.134631956 1389975  A FWS 167774208 + 0 <- (253,3) 0
+259,0    2        6    20.135699076     0  C  WS 167774208 [0]
+
+259,0   11       79    20.136113492  1889  A FWFS 575481200 + 0 <- (253,3) 407706992
+259,0   11       84    20.136634602     0  C WFS 575481200 [0]
+
+:
+.
+
+So three 'C' IMB iotypes: (F)WFS, (F)WS, and (F)WFSM -- at least in the currently limited test event streams.
+But we already have WFS and WFSM in the code when a valid sector is present:
+
+                    if (((this->evtflags & EVTFLG_VALID_SECTOR) != 0) && (strncmp(this->evttyp, "WFS", 3) == 0) && (this->prmact == 'C'))
+                    {
+                        /* ok, either we mangled the sector or this is a weird corner case event like: */
+                        /* 253,3    8      867     9.635721954     0  C WFS 68721747696 [0]            */
+                        /*                                            ^ ^^^ ^^^^^^^^^^^ but no length  */
+                        /* The above is typically an implicit barrier is completing...                 */
+                        printf( "%%W[%05d]-set SPECIAL on event, has sector but no length, is 'C'/'WFS' corner case, don't reject event for missing length (imbtype=%d).\n",
+                                        __LINE__, this->imbtype );
+
+This does not cover the case of '(F)WS' however.
+
+259,0    6        1     2.128390708 1390665  A FWS 2048 + 0 <- (253,0) 0
+259,0    6        6     2.152032263     0  C  WS 2048 [0]
+
+which is an imbtyp Sx.  While it may seem weird that an FUA isn't present in the FWS,WS barrier case, the fact that
+this is not an io that is actually sent to storage as the length is either an explicit or implicit zero-length io,
+makes the need for FWFS,WFS barrier, while better/more explicit in terms of intent, is not really any better or
+worse than a FWS/WS unless there is some super special kernel code that differentiates one case vs the other.  It
+appears that the FWS/WS is just a reductive case of FWFS/WFS.  But for the purpose of state machine tracking, the
+code should count them as different barrier subtypes just for fyi.
+
+# . Typ = 'R'ead, 'W'rite, 'D'iscard, 'B'arrier, or 'N'one (!write & bytes!=0:ioctl?).
+#         'F'lush, but only if this is BEFORE the R|W|D|N letter code
+#         'F'ua,   but only if this is AFTER  the R|W|D|N letter code
+#         'S'yncronous, 'M'eta, or Read'A'head
+
+So the two specific distiguishing characterists of a IMB at C event is that its 
+    a) a 'W'rite, and
+    b) a 'S'ync.
+    c) has an explicit or implicit zero length.
+
+That latter (c) is only really useful in terms of exact or fuzzy match.  I.e. the different between a S0 or Sx cases.
+But either is covered just by having the imbtyp being non-zero (!= IMBTYP_NONE).  But testing for that and then
+over qualifying on 'W' and 'S' being present makes logistical sense in terms of trying to validate the code's understanding
+of the state machine and event flow through it for IMBs.
+
+
+
+This leaves three other sub-sets of events:
+    + (i) imbtyp xx w/exact iotyp match:
+      259,0   11       20     5.027074128  1889  Q FWFS [jbd2/dm-4-8]
+      259,0   11       21     5.027077378  1889  G FWFS [jbd2/dm-4-8]
+
+    + (ii) imbtyp xx w/'FN' FUA/None iotyp match:
+      259,0   11       22     5.027084885   612  D  FN [kworker/11:1H]
+
+    + (iii) imbtyp 0x w/'FN' FUA/None iotyp match:
+      259,0   11       23     5.027852186     0  C  FN 0 [0]
+
+In each of these event cases there is the io context cross-match to io event, i.e. with the 1st A/Q create_io() event being S0
+in the following case:
+
+static char imb_matrix[5][6] =
+{              /* none S0  Sx  00  0x  xx */
+  { /* S0  */       -1, 0,  0,  1,  1,  1 },
+
+
+259,0   11       19     5.027073014  1889  A FWFS 575480512 + 0 <- (253,3) 407706304            << TYPE 1, imb S0
+259,0   11       20     5.027074128  1889  Q FWFS [jbd2/dm-4-8]					<-         imb xx cross-matched to S0, qual=1, allowed/no message
+259,0   11       21     5.027077378  1889  G FWFS [jbd2/dm-4-8]					<-         imb xx " "
+259,0   11       22     5.027084885   612  D  FN [kworker/11:1H]				<-         imb xx " "
+259,0   11       23     5.027852186     0  C  FN 0 [0]						<-         imb 0x " "
+259,0   11       24     5.027859859     0  C WFS 575480512 [0]                                  <-         imb Sx                      qual=0, expected/nominal
+
+In that last Sx case its because S0 and Sx (happening later on) are considered basically equal:
+(1) the first S0 has an explicit length=0 while (2) the latter Sx has an implicit length=0.  The
+rest is just window dressing.
+
+
+

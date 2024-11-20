@@ -1,0 +1,118 @@
+
+[a] 259,0    2        1    20.134631956 1389975  A FWS 167774208 + 0 <- (253,3) 0
+[b] 259,0    2        2    20.134632725 1389975  Q FWS [DOMCacheThread]		>> no sector
+[c] 259,0    2        3    20.134636514 1389975  G FWS [DOMCacheThread]		>> no sector
+[d] 259,0    2        4    20.134642393     110  D  FN [kworker/2:1H]		>> no sector
+[e] 259,0    2        5    20.135694774       0  C  FN 0 [0]			>> sector = 0, no length
+[f] 259,0    2        6    20.135699076       0  C  WS 167774208 [0]		>> sector same as 'A' event, but no length
+
+Each of the above is detectable as an "implicit" barrier due to zero length, no sector/length for a QGD events, zero sector
+spec when its have a specified sector in 'A' context, or matching sector, but no length (assuming 0, therefore barrier), etc.
+Note what this doesn't have is an 'I'nsert action like seen in other kernel version's event flows.  Need to be congnizant of
+that wrinkle.
+
+
+[1] 259,0   11        1     0.024124329  1889  A FWFS 575480360 + 0 <- (253,3) 407706152
+[2] 259,0   11        2     0.024124474  1889  Q FWFS [jbd2/dm-4-8]
+[3] 259,0   11        3     0.024126502  1889  G FWFS [jbd2/dm-4-8]
+[4] 259,0   11        4     0.024133625   612  D  FN [kworker/11:1H]
+[5] 259,0   11        5     0.024899010     0  C  FN 0 [0]
+[6] 259,0   11        6     0.024903271     0  C WFS 575480360 [0]
+
+This is a 5.14 (new) barrier state machine sequence.  I need to change the barrier detection logic to extend it to
+the event has a 'W'rite type and is explicitly of zero length as is the case here.
+
+# . Typ = 'R'ead, 'W'rite, 'D'iscard, 'B'arrier, or 'N'one (!write & bytes!=0:ioctl?).
+#         'F'lush, but only if this is BEFORE the R|W|D|N letter code
+#         'F'ua,   but only if this is AFTER  the R|W|D|N letter code
+#         'S'yncronous, 'M'eta, or Read'A'head
+#         note: the above codes are set within the binary data within the kernel before data is exported.
+#         note: 'B'arrier seems to have been dropped from latest upstream blkparse utility.
+
+[1] a remap event: from dm-3 to nvme0n1, flush,write,fua,sync sector + 0 length ... needs to be marked 
+                   as a implicit-barrier io type (as opposed to 'B'arrier explicit type). Create a
+                   look-aside implicit barrier list that can be used, if needed for later events.
+[2] a queue event: but neither sector or length included making it difficult to match.  If we extend 
+                   the barrier logic so if it there is no explicit sector/length, search look-aside
+                   barrier for oldest barrier and match to that?  Must be same FWFS type though.
+[3] a getreq event:again no sector or length.  Same extended logic as for [2], look into cached
+                   look-aside implicit barrier io list and find first that matches same FWFS... but
+                   if we have nested barriers, should be match newest/most recent instead? Note
+                   a possible half-step verification step might be to also match the PID as {A}QG
+                   sequence *should* be in same PID (and same cpu).  But while that provides extra
+                   weight to the matching algorithm, we can't depend on it to always be there.
+[4] a dispatch   : ...but now the event type if flush/noop.  So we also need matching logic of is
+                   this FN w/ no sector or length assume the "noop" io type means this is referencing
+                   an implicit barrier, aka allow D/FN to match A,Q,G(FWFS) in the machine state. And
+                   if we do this once, set a config in the machine state saying we exercised along this
+                   path.  If this logic fails (i.e. no implicit barrier present) and we're beyond the
+                   start of file, then negate this config of the machine state saying its not allowed
+                   later (e.g. 0=unknown, 1=in-use, -1=not allowed)
+[5] a completion : similar to [4] in type (Forced/Noop) but with sector number of 0.  Being sector 0
+                   and noop should trigger this to be flagged potential implicit barrier, forced or not.
+                   Do the matching withing limits discussed above.
+[6] a completion : 2nd completion, which seems fairly normal these days for read/writes also.  But in
+                   this case we have an actual/correct sector and no length.  Also the io type is no
+                   longer FWFS but WFS.  So we need to see the sector 0 (no length) and 'W' basic type
+                   being a strong implication of a barrier.  But first search for any other io that 
+                   matches EXACTLY (FWFS 575480360,none) -- there will not be a match in this case so
+                   the logic looks for "special" cases, in this case the possible/likely implicit barrier
+                   flag is set because of W sector,none status.  Searching the cached implicit barrier
+                   look-aside list and we find a basic 'W' plus sector number match.  And the logic 
+                   should allow both a explictly specified zero length or no length (implying zero 
+                   length in this case).
+
+Finally, the io structure pointed to within the look-aside cached barrier list is removed upon flush/
+output of this merged io and only then.  As while the io is moved to the completion queue upon the 
+first 'C' event.  There needs to be a delayed flush to allow 2nd, 3rd, etc 'C'ompletion events against
+an io (or its BIO parts) to be matched and accounted for.
+ 
+
+========================================================================================
+========================================================================================
+========================================================================================
+
+New routines
+  + imb_event(event)		; returns non-zero value if IMplied Barrier per sector,length information only
+  + imb_iotype(io,event)        ; returns non-zero value if io context is implied barrier and the event information
+                                  is allowed to match this io context (aka A is FWFS and event is D/FN or C/WFS...)
+  + imb_match (io,event)        ; if the event is an implied barrier, find an io in the look-aside barrier pointer
+                                  list that this event is allowed to match.  Note, the look-aside list is in LIFO
+                                  order and the whole list needs to be searched so that the oldest (earliest in time
+                                  stamp, oldest in terms of distance from this event's now time) open barrier is 
+                                  matched.
+
++ Add a fixed size look-aside cache of io pointers, say 128 or 256 in size -- something
+  large and ridiculous.  At A|Q time, if imb_event(event) returns true, add the 
+  event to the cache list.  The default value in the list is 0, and a max index used
+  is tracked along with active index count.  At io context output time, look in the 
+  barrier list (if a barrier), and if found, set the index entry to -1L.  Compress/scavange
+  inactive entries only when the max_used index is greater than active_used+4 count.
+      note: while barriers can be nested, they haven't been seen in the wild being nested
+            greater than 4-6 times.
+
++ add imb_event(event) routine.  It returns true *if* sector,length is:
+       n,0 | 0,0 | 0,- | n,- | -,-  
+  each of which is a non-zero sub-type of an implicit barrier.
+
++ add imb_iotype(io,event) which returns true if:
+       a) the io is marked as "implicit barrier" type
+       b) and event type + io type are allowed as a match to this io context.
+          e.g. D/FN,-- is allowed for A/FWFS io context.  So matching criteria
+          is per event type (A,G,Q,I,D,C,C).  
+       note: the one sticking point is the 'C  FN 0 [0]' event (C/FN,0-) ...
+             this is minor variant to some 'C W 0 [0]' events seen from some
+             kernels.  The 'W' might be allowed to match FWFS of the barrier
+             when in fact its a completion for an io prior to the barrier.
+             Need to detect/guard against his somehow.
+
++ add imb_match (io,event)
+  barriers can be nested as in
+     io-set(a), imb(a), io-set(b), imb(b), io-set(c), imb(c).
+
+ This means all io in set(a) must complete before imb(a) is satisfied and until
+ that is satisfied, the io in set(b) cannot be issued, and so forth.  So when
+ a barrier completes (C), that complete must match the oldest outstanding barrier.
+ With the look-aside cache list in LIFO order (new barries add to the start of the
+ list), the whole list needs to be searched for a match and the last (oldest on list)
+ match is the one to stick.

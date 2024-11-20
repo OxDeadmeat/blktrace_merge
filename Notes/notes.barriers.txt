@@ -1,0 +1,88 @@
+
+The event matching code for barriers was tried after all existing functions of matching -- after the last "special" case code.
+But this really wasn't working well as the last special code is expecting it to be just that the 'last' matching attemp code 
+so when if fails it marks up the event as unmatchable along with other actions.
+
+But really, the barrier matching code belongs right after the exact match attempt code and before the specialized code for
+split BIOs, et.al.  The barriers are easily and uniquely identifiable events in that either the length is an explict 0 or
+has no length present (implied zero?).  For events we can easily identify the set of known types for a given event:
+    + S0 (sector > 1, length=(explicit) zero)
+    + Sx (sector > 1, no length specified (implicit zero length))
+    + 00 (sector = 0, length=0)
+    + 0x (sector = 0, no length)
+    + xx (neither sector no length specified)
+
+One issue is that what type of cross matching do we allow -- and whether we should restrict any type of cross-matching or
+just issue a warning or informational message for same.  I.e. the initial A/Q events are 00 type, but the D or C events are
+Sx type -- should that be allowed.  The only time that is likely/might occur if there are different types of barrier sequences
+simultaneously?  And should the code guard prevent this type of cross-matching or not.  Nominally, we expect just one barrier
+to be outstanding at a time, especially with blkmq kernels -- the barrier blocks at the scheduler queue level before an Insert
+type event -- often there is no Insert event.  And even if there is a Dispatch (to driver) event, that really doesn't take place
+as there is no actual data movement command to be issued to storage.  But at the same time, while we haven't see a sequence like:
+
+[1] 259,0   11        1     0.024124329  1889  A FWFS 0 + 0 <- (253,3) 0
+[2] 259,0   11        2     0.024124474  1889  Q FWFS [jbd2/dm-4-8]
+[3] 259,0   11        3     0.024126502  1889  G FWFS [jbd2/dm-4-8]
+[4] 259,0   11        4     0.024133625   612  D  FN [kworker/11:1H]
+[5] 259,0   11        5     0.024899010     0  C  FN 0 [0]
+[6] 259,0   11        6     0.024903271     0  C WFS 575480360 [0]
+
+..it does not mean they can't or won't happen.  Just because the code hasn't encountered them in the past does not mean they
+won't be encountered in the future.
+
+So in this case we should specify a 5 x 5 expectation matrix and whether its expected/nominal behavior or something the code
+thinks is odd (aka 00 A/Q but a Sx D/C).  The first event for an io context (A or Q), sets the initial, anchor point, of the
+imb type.  Subsequent subtypes encountered in A/G/I/D/C then may be expected/nominal (xx Q,G,D imb types above and a Sx imb
+type for C event when initial imb type encountered at A event time was S0).
+
+A/Q                   A/Q/G/I/D/C	   Classification
+Initial imb type      Follow-on imb type
+S0                    S0                   nominal/expected
+                      Sx                   allowed/expected (x length ~= implicit zero length)
+                      00                   allowed/no message
+                      0x                   allowed/no message
+                      xx                   allowed/no message
+:
+.
+00                    S0                   allowed/warning message
+                      Sx                   allowed/warning message
+                      00                   moninal/expected
+                      0x                   nominal/expected
+                      xx                   allowed/no message
+
+etc.
+                    
+
+=================================================================================
+
+Lookaside io context pointer cache for imb io contexts
+
+Originally this was coded such that free entries were nil pointers, and used but
+freed entries were -1.  And adding a new context used nil or -1 entries on a first
+found basis.  This was a bug in the initial implementation.
+
+When finding a barrier to match the current event, its a two pass process (although
+we should be able to collapse this into one pass with two different results at the end
+of the loop).  The first pass searches for best match, aka S0 searches for *exact* S0 or
+Sx match and remembers the last one found.  The "last one found" is needed in that IMBs,
+if nested, needs a match the most recent one which is the one latest within the list as
+we're adding, or should be adding, to the end of the list.  This means we cannot use -1
+entries as this can generate out of order lists in the cache.
+
+So we should only add a new entry to a pointer that is nil and not -1 (used/freed).  And
+only if we get to the end of the list and find no nil entries, then perform a list compression
+to remove the freed entries.  But honestly, the expectation is that IMBs are infrequently 
+nested to the point that multiple are active at the same time -- yes, it has been seen but
+it is not a frequent footprint.  As such, if we're freeing and entry before we set it to -1,
+we check to see if the next entry is zero and instead set it to nil -- freeing and compressing
+the list at the same time.  Therefore is only 1 IMB is present at a time, the code only ever needs
+to search/look at the 1st entry.  
+
+And the code should go further, if searching for an entry to insert/add a new IMB goes beyond the
+first cache entry indicating IMBs are nested, then it should generate, and remember, a warning to 
+that affect.  The warning issued in situ *and* again at the end of the file.  Its just not something
+the code is expecting to find very often in the event stream and it needs to highlight that this 
+was encountered.
+
+
+
