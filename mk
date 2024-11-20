@@ -1,12 +1,12 @@
 #!/bin/bash
 #
+# Recompile the program locally:
 #
  cc                  -O2 -o blktrace_merge         blktrace_merge.c   -std=c99 -lm          |& tee _cc.log 
 #cc                  -O2 -o blktrace_merge.O2      blktrace_merge.c   -std=c99 -lm          |& tee _cc.log
 #cc                  -O3 -o blktrace_merge.O3      blktrace_merge.c   -std=c99 -lm          |& tee _cc.log
 #cc -pg -g3          -O0 -o blktrace_merge.dbg     blktrace_merge.c   -std=c99 -lm -DDEBUG  |& tee _cc.log
 #cc -pg -rdynamic -g -O0 -o blktrace_merge.sym     blktrace_merge.c   -std=c99 -lm -lg      |& tee _cc.log		# to get cores with symbols
-#cc -pg -rdynamic -g -O0 -o blktrace_merge.sym     blktrace_merge.c   -std=c99 -lm -lg      |& tee _cc.log		<< to get cores with symbols
 #
 if [ -e _cc.log ]
 then
